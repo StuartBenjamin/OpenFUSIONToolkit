@@ -841,6 +841,204 @@ END DO
 CLOSE(io_unit)
 END SUBROUTINE gs_analyze
 !---------------------------------------------------------------------------
+! SUBROUTINE gs_save_decon
+!---------------------------------------------------------------------------
+!> Needs docs
+!---------------------------------------------------------------------------
+subroutine gs_save_decon(gseq,npsi,ntheta,error_str)
+class(gs_eq), intent(inout) :: gseq
+integer(4), intent(in) :: npsi
+integer(4), intent(in) :: ntheta
+CHARACTER(LEN=80), OPTIONAL, INTENT(out) :: error_str
+type(gsinv_interp), target :: field
+type(oft_lag_brinterp) :: psi_int
+real(8) :: gop(3,3),psi_surf(1),pt_last(3)
+real(8) :: raxis,zaxis,f(3),pt(3),rmax,x1,x2,xr
+real(8), allocatable :: ptout(:,:)
+real(4), allocatable :: rout(:,:),zout(:,:),cout(:,:)
+real(8), parameter :: tol=1.d-10
+integer(4) :: j,k,cell,io_unit
+TYPE(spline_type) :: rz
+!---
+IF(PRESENT(error_str))error_str=""
+WRITE(*,'(2A)')oft_indent,'Saving DCON file'
+CALL oft_increase_indent
+!---
+raxis=gseq%o_point(1)
+zaxis=gseq%o_point(2)
+x1=0.d0; x2=1.d0
+IF(gseq%plasma_bounds(1)>-1.d98)THEN
+  x1=gseq%plasma_bounds(1); x2=gseq%plasma_bounds(2)
+END IF
+xr = (x2-x1)
+x1 = x1 + xr*1.d-3
+x2 = x2 - xr*1.d-3
+psi_int%u=>gseq%psi
+CALL psi_int%setup()
+!---Find Rmax along Zaxis
+rmax=raxis
+cell=0
+DO j=1,100
+  pt=[(gseq%rmax-raxis)*j/REAL(100,8)+raxis,zaxis,0.d0]
+  CALL bmesh_findcell(smesh,cell,pt,f)
+  IF( (MAXVAL(f)>1.d0+tol) .OR. (MINVAL(f)<-tol) )EXIT
+  CALL psi_int%interp(cell,f,gop,psi_surf)
+  IF( psi_surf(1) < x1)EXIT
+  rmax=pt(1)
+END DO
+pt_last=[(.9d0*rmax+.1d0*raxis),zaxis,0.d0]
+!---
+IF(oft_debug_print(1))THEN
+  WRITE(*,'(2A)')oft_indent,'Axis Position:'
+  CALL oft_increase_indent
+  WRITE(*,'(2A,ES11.3)')oft_indent,'R    = ',raxis
+  WRITE(*,'(2A,ES11.3)')oft_indent,'Z    = ',zaxis
+  WRITE(*,'(2A,ES11.3)')oft_indent,'Rmax = ',rmax
+  CALL oft_decrease_indent
+END IF
+!---Trace
+call set_tracer(1)
+ALLOCATE(cout(4,npsi))
+ALLOCATE(rout(npsi,ntheta))
+ALLOCATE(zout(npsi,ntheta))
+!$omp parallel private(j,psi_surf,pt,ptout,field,rz,gop) firstprivate(pt_last)
+field%u=>gseq%psi
+CALL field%setup()
+active_tracer%neq=3
+active_tracer%B=>field
+active_tracer%maxsteps=8e4
+active_tracer%raxis=raxis
+active_tracer%zaxis=zaxis
+active_tracer%inv=.TRUE.
+ALLOCATE(ptout(3,active_tracer%maxsteps+1))
+!$omp do schedule(dynamic,1)
+do j=1,npsi-1
+  IF(PRESENT(error_str))THEN
+    IF(error_str/="")CYCLE
+  END IF
+  !---------------------------------------------------------------------------
+  ! Trace contour
+  !---------------------------------------------------------------------------
+  psi_surf(1)=(x2-x1)*(1.d0-j/REAL(npsi,4))**2
+  psi_surf(1)=x2 - psi_surf(1)
+  IF(gseq%diverted.AND.(psi_surf(1)-x1)/(x2-x1)<0.02d0)THEN ! Use higher tracing tolerance near divertor
+    active_tracer%tol=1.d-10
+  ELSE
+    active_tracer%tol=1.d-8
+  END IF
+  pt=pt_last
+  !$omp critical
+  CALL gs_psi2r(gseq,psi_surf(1),pt)
+  !$omp end critical
+  CALL tracinginv_fs(pt,ptout)
+  pt_last=pt
+  !---Exit if trace fails
+  IF(active_tracer%status/=1)THEN
+    IF(PRESENT(error_str))THEN
+      !$omp critical
+      WRITE(error_str,"(A,F10.4)")"Tracing failed at psi = ",1.d0-psi_surf
+      !$omp end critical
+      CYCLE
+    ELSE
+      call oft_abort('Trace did not complete.','gs_save_decon',__FILE__)
+    END IF
+  END IF
+  !---------------------------------------------------------------------------
+  ! Perform cubic spline interpolation
+  !---------------------------------------------------------------------------
+  !---Allocate spline
+  CALL spline_alloc(rz,active_tracer%nsteps,2)
+  !---Setup Spline
+  rz%xs(0:active_tracer%nsteps) = ptout(1,1:active_tracer%nsteps+1)/ptout(1,active_tracer%nsteps+1)
+  rz%fs(0:active_tracer%nsteps,1) = ptout(2,1:active_tracer%nsteps+1)
+  rz%fs(0:active_tracer%nsteps,2) = ptout(3,1:active_tracer%nsteps+1)
+  CALL spline_fit(rz,"periodic")
+  !---Resample trace
+  DO k=0,ntheta-1
+    CALL spline_eval(rz,k/REAL(ntheta-1,8),0)
+    rout(j,k+1)=rz%f(1)
+    zout(j,k+1)=rz%f(2)
+  END DO
+  !---Destroy Spline
+  CALL spline_dealloc(rz)
+  !---------------------------------------------------------------------------
+  ! Save DCON information
+  !---------------------------------------------------------------------------
+  cout(1,j)=psi_surf(1) ! Poloidal flux
+  !---Toroidal flux function
+  IF(gseq%mode==0)THEN
+    cout(2,j)=gseq%alam*gseq%I%f(psi_surf(1))+gseq%I%f_offset
+  ELSE
+    cout(2,j)=SQRT(gseq%alam*gseq%I%f(psi_surf(1)) + gseq%I%f_offset**2) &
+    + gseq%I%f_offset*(1.d0-SIGN(1.d0,gseq%I%f_offset))
+  END IF
+  cout(3,j)=gseq%pnorm*gseq%P%f(psi_surf(1))/mu0 ! Plasma pressure
+  cout(4,j)=cout(2,j)*active_tracer%v(3)/(2*pi) ! Safety Factor (q)
+end do
+CALL active_tracer%delete
+DEALLOCATE(ptout)
+!$omp end parallel
+IF(PRESENT(error_str))THEN
+  IF(error_str/="")THEN
+    DEALLOCATE(cout,rout,zout)
+    RETURN
+  END IF
+END IF
+!---Information for O-point
+rout(npsi,:)=raxis
+zout(npsi,:)=zaxis
+cout(1,npsi)=x2
+IF(gseq%mode==0)THEN
+  cout(2,npsi)=(gseq%alam*gseq%I%f(x2)+gseq%I%f_offset)
+ELSE
+  cout(2,npsi)=SQRT(gseq%alam*gseq%I%f(x2) + gseq%I%f_offset**2) &
+      + gseq%I%f_offset*(1.d0-SIGN(1.d0,gseq%I%f_offset))
+END IF
+cout(3,npsi)=gseq%pnorm*gseq%P%f(x2)/mu0
+cout(4,npsi)=(cout(4,npsi-2)-cout(4,npsi-1))*(x2-cout(1,npsi-1))/(cout(1,npsi-2)-cout(1,npsi-1)) + cout(4,npsi-1)
+!---------------------------------------------------------------------------
+! Create output file
+!---------------------------------------------------------------------------
+OPEN(NEWUNIT=io_unit,FILE='Psitri.dci',FORM='UNFORMATTED')
+!---------------------------------------------------------------------------
+! Write array lengths
+!---------------------------------------------------------------------------
+WRITE(io_unit)INT(npsi-1,4),INT(ntheta-1,4)
+!---------------------------------------------------------------------------
+! Write out flux surface quantities
+!
+! cout(1,:) -> psi(0:mpsi)
+! cout(2,:) -> f(0:mpsi)
+! cout(3,:) -> p(0:mpsi)
+! cout(4,:) -> q(0:mpsi)
+!---------------------------------------------------------------------------
+DO j=1,4
+  WRITE(io_unit)cout(j,:)
+END DO
+!---------------------------------------------------------------------------
+! Write out inverse representation
+!
+! rout -> r(0:mpsi,0:mtheta)
+! zout -> z(0:mpsi,0:mtheta)
+!---------------------------------------------------------------------------
+WRITE(io_unit)rout
+WRITE(io_unit)zout
+!---------------------------------------------------------------------------
+! Close output file
+!---------------------------------------------------------------------------
+CLOSE(io_unit)
+!---
+IF(oft_debug_print(1))THEN
+  WRITE(*,'(2A,2ES11.3)')oft_indent,'Psi  = ',x1,x2
+  WRITE(*,'(2A,F7.2)')oft_indent,'Qmin = ',MINVAL(cout(4,:))
+  WRITE(*,'(2A,F7.2)')oft_indent,'Qmax = ',MAXVAL(cout(4,:))
+  ! WRITE(*,'(2A)')oft_indent,'Done'
+END IF
+CALL oft_decrease_indent
+!---
+DEALLOCATE(cout,rout,zout)
+end subroutine gs_save_decon
+!---------------------------------------------------------------------------
 ! SUBROUTINE gs_save_ifile
 !---------------------------------------------------------------------------
 !> Needs docs
