@@ -845,8 +845,9 @@ END SUBROUTINE gs_analyze
 !---------------------------------------------------------------------------
 !> Needs docs
 !---------------------------------------------------------------------------
-subroutine gs_save_decon(gseq,npsi,ntheta,error_str,meshsearch,maxsteps,ttol)
+subroutine gs_save_decon(gseq,filename,npsi,ntheta,error_str,meshsearch,maxsteps,ttol)
 class(gs_eq), intent(inout) :: gseq
+CHARACTER(LEN=OFT_PATH_SLEN), intent(in) :: filename 
 integer(4), intent(in) :: npsi
 integer(4), intent(in) :: ntheta
 integer(4), intent(inout) :: meshsearch
@@ -1010,7 +1011,7 @@ cout(4,npsi)=(cout(4,npsi-2)-cout(4,npsi-1))*(x2-cout(1,npsi-1))/(cout(1,npsi-2)
 !---------------------------------------------------------------------------
 ! Create output file
 !---------------------------------------------------------------------------
-OPEN(NEWUNIT=io_unit,FILE='Psitri.dci',FORM='UNFORMATTED')
+OPEN(NEWUNIT=io_unit,FILE=TRIM(filename),FORM='UNFORMATTED')
 !---------------------------------------------------------------------------
 ! Write array lengths
 !---------------------------------------------------------------------------
@@ -1054,8 +1055,9 @@ end subroutine gs_save_decon
 !---------------------------------------------------------------------------
 !> Needs docs
 !---------------------------------------------------------------------------
-subroutine gs_save_ifile(gseq,npsi,ntheta,error_str,meshsearch,maxsteps,ttol)
+subroutine gs_save_ifile(gseq,filename,npsi,ntheta,error_str,meshsearch,maxsteps,ttol)
 class(gs_eq), intent(inout) :: gseq
+CHARACTER(LEN=OFT_PATH_SLEN), intent(in) :: filename 
 integer(4), intent(in) :: npsi
 integer(4), intent(in) :: ntheta
 integer(4), intent(inout) :: meshsearch
@@ -1221,7 +1223,7 @@ cout(4,npsi)=(cout(4,npsi-2)-cout(4,npsi-1))*(x2-cout(1,npsi-1))/(cout(1,npsi-2)
 !---------------------------------------------------------------------------
 ! Create output file
 !---------------------------------------------------------------------------
-OPEN(NEWUNIT=io_unit,FILE='Psitri.dci',FORM='UNFORMATTED')
+OPEN(NEWUNIT=io_unit,FILE=TRIM(filename),FORM='UNFORMATTED')
 !---------------------------------------------------------------------------
 ! Write array lengths: both 1 larger than gs_save_decon to match ifile
 !---------------------------------------------------------------------------
