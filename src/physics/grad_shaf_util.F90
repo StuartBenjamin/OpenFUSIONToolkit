@@ -1036,12 +1036,17 @@ zout_(1:npsi,1:ntheta)=zout(npsi:1:-1,1:ntheta)
 r(:,ntheta)=r(:,1)
 r(:,ntheta)=r(:,1)
 !---------------------------------------------------------------------------
+! Write out inverse representation: transposed relative to gs_save_decon to match ifile
 !
 ! rout -> r(0:mpsi,0:mtheta)
 ! zout -> z(0:mpsi,0:mtheta)
+! rout__ -> r(0:mtheta,mpsi:0)
+! zout__ -> z(0:mtheta,mpsi:0)
 !---------------------------------------------------------------------------
-WRITE(io_unit)rout
-WRITE(io_unit)zout
+rout__=TRANSPOSE(rout_)
+zout__=TRANSPOSE(zout_)
+WRITE(io_unit)rout__
+WRITE(io_unit)zout__
 !---------------------------------------------------------------------------
 ! Close output file
 !---------------------------------------------------------------------------
