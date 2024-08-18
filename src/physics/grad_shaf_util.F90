@@ -931,7 +931,11 @@ do j=1,npsi-1
   psi_surf(1)=(x2-x1)*(1.d0-j/REAL(npsi,8))**2
   psi_surf(1)=x2 - psi_surf(1)
   IF(gseq%diverted.AND.(psi_surf(1)-x1)/(x2-x1)<0.02d0)THEN ! Use higher tracing tolerance near divertor
-    active_tracer%tol=1.d-10
+    IF(ttol.gt.1.d-10)THEN
+      active_tracer%tol=1.d-10
+    ELSE
+      active_tracer%tol=ttol
+    END IF
   ELSE
     active_tracer%tol=1.d-8
   END IF
