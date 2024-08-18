@@ -1014,9 +1014,9 @@ cout(4,npsi)=(cout(4,npsi-2)-cout(4,npsi-1))*(x2-cout(1,npsi-1))/(cout(1,npsi-2)
 !---------------------------------------------------------------------------
 OPEN(NEWUNIT=io_unit,FILE='Psitri.dci',FORM='UNFORMATTED')
 !---------------------------------------------------------------------------
-! Write array lengths
+! Write array lengths: both 1 larger than gs_save_decon to match ifile
 !---------------------------------------------------------------------------
-WRITE(io_unit)INT(npsi-1,4),INT(ntheta-1,4)
+WRITE(io_unit)INT(npsi,4),INT(ntheta,4)
 !---------------------------------------------------------------------------
 ! Write out flux surface quantities
 !
