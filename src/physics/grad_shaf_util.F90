@@ -845,10 +845,13 @@ END SUBROUTINE gs_analyze
 !---------------------------------------------------------------------------
 !> Needs docs
 !---------------------------------------------------------------------------
-subroutine gs_save_decon(gseq,npsi,ntheta,error_str)
+subroutine gs_save_decon(gseq,npsi,ntheta,error_str,meshsearch,maxsteps,ttol)
 class(gs_eq), intent(inout) :: gseq
 integer(4), intent(in) :: npsi
 integer(4), intent(in) :: ntheta
+integer(4), intent(inout) :: meshsearch
+integer(4), intent(in) :: maxsteps
+real(8), intent(in) :: ttol
 CHARACTER(LEN=80), OPTIONAL, INTENT(out) :: error_str
 type(gsinv_interp), target :: field
 type(oft_lag_brinterp) :: psi_int
