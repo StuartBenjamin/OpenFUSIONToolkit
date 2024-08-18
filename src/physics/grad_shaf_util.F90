@@ -1018,16 +1018,18 @@ OPEN(NEWUNIT=io_unit,FILE='Psitri.dci',FORM='UNFORMATTED')
 !---------------------------------------------------------------------------
 WRITE(io_unit)INT(npsi,4),INT(ntheta,4)
 !---------------------------------------------------------------------------
-! Write out flux surface quantities
-!
-! cout(1,:) -> psi(0:mpsi)
-! cout(2,:) -> f(0:mpsi)
-! cout(3,:) -> p(0:mpsi)
-! cout(4,:) -> q(0:mpsi)
+! Write out flux surface quantities: reversing order to gs_save_decon
+!                                    s.t. psi is increasing as in ifile
+! cout(1,:) -> psi(mpsi:0) 
+! cout(2,:) -> f(mpsi:0)
+! cout(3,:) -> p(mpsi:0)
+! cout(4,:) -> q(mpsi:0)
 !---------------------------------------------------------------------------
 DO j=1,4
-  WRITE(io_unit)cout(j,:)
+  WRITE(io_unit)cout(j,npsi:1:-1) 
 END DO
+rout_(1:npsi,1:ntheta)=rout(npsi:1:-1,1:ntheta)
+zout_(1:npsi,1:ntheta)=zout(npsi:1:-1,1:ntheta)
 !---------------------------------------------------------------------------
 ! Write out inverse representation
 !
