@@ -1031,7 +1031,11 @@ END DO
 rout_(1:npsi,1:ntheta)=rout(npsi:1:-1,1:ntheta)
 zout_(1:npsi,1:ntheta)=zout(npsi:1:-1,1:ntheta)
 !---------------------------------------------------------------------------
-! Write out inverse representation
+! Imposing periodicity: same as read_eq_hansen_inverse in GPEC, ifile requirement? 
+!---------------------------------------------------------------------------
+r(:,ntheta)=r(:,1)
+r(:,ntheta)=r(:,1)
+!---------------------------------------------------------------------------
 !
 ! rout -> r(0:mpsi,0:mtheta)
 ! zout -> z(0:mpsi,0:mtheta)
