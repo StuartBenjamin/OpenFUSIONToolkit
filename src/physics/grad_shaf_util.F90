@@ -883,8 +883,11 @@ CALL psi_int%setup()
 !---Find Rmax along Zaxis
 rmax=raxis
 cell=0
-DO j=1,100
-  pt=[(gseq%rmax-raxis)*j/REAL(100,8)+raxis,zaxis,0.d0]
+IF(mesh_search<100)THEN
+  mesh_search=100
+END IF
+DO j=1,mesh_search 
+  pt=[(gseq%rmax-raxis)*j/REAL(mesh_search,8)+raxis,zaxis,0.d0]
   CALL bmesh_findcell(smesh,cell,pt,f)
   IF( (MAXVAL(f)>1.d0+tol) .OR. (MINVAL(f)<-tol) )EXIT
   CALL psi_int%interp(cell,f,gop,psi_surf)
