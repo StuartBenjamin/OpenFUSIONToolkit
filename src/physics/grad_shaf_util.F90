@@ -1274,13 +1274,16 @@ end subroutine gs_save_ifile
 !---------------------------------------------------------------------------
 !> Save equilibrium to General Atomics gEQDSK file
 !---------------------------------------------------------------------------
-subroutine gs_save_eqdsk(gseq,filename,nr,nz,rbounds,zbounds,run_info,limiter_file,psi_pad,error_str)
+subroutine gs_save_eqdsk(gseq,filename,nr,nz,rbounds,zbounds,run_info,limiter_file,psi_pad,error_str,meshsearch,maxsteps,ttol)
 class(gs_eq), intent(inout) :: gseq !< Equilibrium to save
 CHARACTER(LEN=OFT_PATH_SLEN), intent(in) :: filename 
 integer(4), intent(in) :: nr !< Number of radial points for flux/psi grid
 integer(4), intent(in) :: nz !< Number of vertical points for flux grid
 real(8), intent(in) :: rbounds(2) !< Radial extents for flux grid
 real(8), intent(in) :: zbounds(2) !< Radial extents for flux grid
+integer(4), intent(inout) :: meshsearch !< Option to refine mesh search for largest point(?)
+integer(4), intent(in) :: maxsteps !< Option to increase max number of tracer steps 
+real(8), intent(in) :: ttol !< Option to increase tolerance of active tracer
 CHARACTER(LEN=36), intent(in) :: run_info !< Run information string [36]
 CHARACTER(LEN=OFT_PATH_SLEN), intent(in) :: limiter_file !< Path to limiter file
 REAL(8), intent(in) :: psi_pad !< Padding at LCFS in normalized units
@@ -1326,8 +1329,11 @@ CALL psi_int%setup()
 !---Find Rmax along Zaxis
 rmax=raxis
 cell=0
-DO j=1,100
-  pt=[(gseq%rmax-raxis)*j/REAL(100,8)+raxis,zaxis,0.d0]
+IF(meshsearch<100)THEN
+  meshsearch=100
+END IF
+DO j=1,meshsearch 
+  pt=[(gseq%rmax-raxis)*j/REAL(meshsearch,8)+raxis,zaxis,0.d0]
   CALL bmesh_findcell(smesh,cell,pt,f)
   IF( (MAXVAL(f)>1.d0+tol) .OR. (MINVAL(f)<-tol) )EXIT
   CALL psi_int%interp(cell,f,gop,psi_tmp)
@@ -1353,7 +1359,8 @@ field%u=>gseq%psi
 CALL field%setup()
 active_tracer%neq=3
 active_tracer%B=>field
-active_tracer%maxsteps=8e4
+maxsteps=maxsteps+8e4
+active_tracer%maxsteps=maxsteps
 active_tracer%raxis=raxis
 active_tracer%zaxis=zaxis
 active_tracer%inv=.TRUE.
@@ -1368,7 +1375,11 @@ do j=1,nr
   psi_surf=(x2-x1)*((j-1)/REAL(nr-1,8))! + x1!**2
   psi_surf=x2 - psi_surf
   IF(gseq%diverted.AND.(psi_surf-x1)/(x2-x1)<0.02d0)THEN ! Use higher tracing tolerance near divertor
-    active_tracer%tol=1.d-10
+    IF(ttol.gt.1.d-10)THEN
+      active_tracer%tol=1.d-10
+    ELSE
+      active_tracer%tol=ttol
+    END IF
   ELSE
     active_tracer%tol=1.d-8
   END IF
