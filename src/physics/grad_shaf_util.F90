@@ -914,7 +914,8 @@ field%u=>gseq%psi
 CALL field%setup()
 active_tracer%neq=3
 active_tracer%B=>field
-active_tracer%maxsteps=8e4
+maxsteps=maxsteps+8e4
+active_tracer%maxsteps=maxsteps
 active_tracer%raxis=raxis
 active_tracer%zaxis=zaxis
 active_tracer%inv=.TRUE.
