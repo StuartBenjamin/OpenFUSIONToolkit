@@ -841,27 +841,32 @@ END DO
 CLOSE(io_unit)
 END SUBROUTINE gs_analyze
 !---------------------------------------------------------------------------
-! SUBROUTINE gs_save_decon
+! SUBROUTINE gs_save_ifile
 !---------------------------------------------------------------------------
 !> Needs docs
 !---------------------------------------------------------------------------
-subroutine gs_save_decon(gseq,npsi,ntheta,error_str)
+subroutine gs_save_ifile(gseq,npsi,ntheta,error_str,meshsearch,maxsteps,ttol)
 class(gs_eq), intent(inout) :: gseq
 integer(4), intent(in) :: npsi
 integer(4), intent(in) :: ntheta
+integer(4), intent(inout) :: meshsearch
+integer(4), intent(in) :: maxsteps
+real(8), intent(in) :: ttol
 CHARACTER(LEN=80), OPTIONAL, INTENT(out) :: error_str
 type(gsinv_interp), target :: field
 type(oft_lag_brinterp) :: psi_int
 real(8) :: gop(3,3),psi_surf(1),pt_last(3)
 real(8) :: raxis,zaxis,f(3),pt(3),rmax,x1,x2,xr
 real(8), allocatable :: ptout(:,:)
-real(4), allocatable :: rout(:,:),zout(:,:),cout(:,:)
+real(8), allocatable :: rout(:,:),zout(:,:),cout(:,:)
+real(8), allocatable :: rout_(:,:),zout_(:,:)
+real(8), allocatable :: rout__(:,:),zout__(:,:)
 real(8), parameter :: tol=1.d-10
 integer(4) :: j,k,cell,io_unit
 TYPE(spline_type) :: rz
 !---
 IF(PRESENT(error_str))error_str=""
-WRITE(*,'(2A)')oft_indent,'Saving DCON file'
+WRITE(*,'(2A)')oft_indent,'Saving ifile'
 CALL oft_increase_indent
 !---
 raxis=gseq%o_point(1)
@@ -919,7 +924,7 @@ do j=1,npsi-1
   !---------------------------------------------------------------------------
   ! Trace contour
   !---------------------------------------------------------------------------
-  psi_surf(1)=(x2-x1)*(1.d0-j/REAL(npsi,4))**2
+  psi_surf(1)=(x2-x1)*(1.d0-j/REAL(npsi,8))**2
   psi_surf(1)=x2 - psi_surf(1)
   IF(gseq%diverted.AND.(psi_surf(1)-x1)/(x2-x1)<0.02d0)THEN ! Use higher tracing tolerance near divertor
     active_tracer%tol=1.d-10
@@ -936,11 +941,11 @@ do j=1,npsi-1
   IF(active_tracer%status/=1)THEN
     IF(PRESENT(error_str))THEN
       !$omp critical
-      WRITE(error_str,"(A,F10.4)")"Tracing failed at psi = ",1.d0-psi_surf
+      WRITE(error_str,"(A,F20.16)")"Tracing failed at psi = ",1.d0-psi_surf
       !$omp end critical
       CYCLE
     ELSE
-      call oft_abort('Trace did not complete.','gs_save_decon',__FILE__)
+      call oft_abort('Trace did not complete.','gs_save_ifile',__FILE__)
     END IF
   END IF
   !---------------------------------------------------------------------------
@@ -962,7 +967,7 @@ do j=1,npsi-1
   !---Destroy Spline
   CALL spline_dealloc(rz)
   !---------------------------------------------------------------------------
-  ! Save DCON information
+  ! Save ifile information
   !---------------------------------------------------------------------------
   cout(1,j)=psi_surf(1) ! Poloidal flux
   !---Toroidal flux function
@@ -1036,8 +1041,8 @@ IF(oft_debug_print(1))THEN
 END IF
 CALL oft_decrease_indent
 !---
-DEALLOCATE(cout,rout,zout)
-end subroutine gs_save_decon
+DEALLOCATE(cout,rout,zout,rout_,zout_,rout__,zout__)
+end subroutine gs_save_ifile
 !---------------------------------------------------------------------------
 !> Save equilibrium to General Atomics gEQDSK file
 !---------------------------------------------------------------------------
