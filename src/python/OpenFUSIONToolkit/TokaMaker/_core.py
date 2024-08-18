@@ -1250,7 +1250,7 @@ class TokaMaker():
         return numpy.ctypeslib.as_array(pts_loc,shape=(npts.value, 2)), \
             numpy.ctypeslib.as_array(flux_loc,shape=(npts.value,))
 
-    def save_eqdsk(self,filename,nr=65,nz=65,rbounds=None,zbounds=None,run_info='',lcfs_pad=0.01):
+    def save_eqdsk(self,filename,nr=65,nz=65,rbounds=None,zbounds=None,run_info='',lcfs_pad=0.01,meshsearch=0,maxsteps=0,ttol=1e-10):
         '''! Save current equilibrium to gEQDSK format
 
         @param filename Filename to save equilibrium to
@@ -1260,6 +1260,9 @@ class TokaMaker():
         @param zbounds Extents of grid in Z
         @param run_info Run information for EQDSK file (maximum of 36 characters)
         @param lcfs_pad Padding in normalized flux at LCFS
+        @param meshsearch Set > 100 if using a very fine gs mesh
+        @param maxsteps Field line tracer max number of steps (defaults to maxsteps+8e4)
+        @param ttol Field line tracer tolerance near separatrix
         '''
         cfilename = c_char_p(filename.encode())
         if len(run_info) > 36:
@@ -1274,7 +1277,7 @@ class TokaMaker():
             dr = zbounds[1]-zbounds[0]
             zbounds += numpy.r_[-1.0,1.0]*dr*0.05
         cstring = c_char_p(b""*200)
-        tokamaker_save_eqdsk(cfilename,c_int(nr),c_int(nz),rbounds,zbounds,crun_info,c_double(lcfs_pad),cstring)
+        tokamaker_save_eqdsk(cfilename,c_int(nr),c_int(nz),rbounds,zbounds,crun_info,c_double(lcfs_pad),cstring,c_int(meshsearch),c_int(maxsteps),c_double(ttol))
         if cstring.value != b'':
             raise Exception(cstring.value)
 
