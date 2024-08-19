@@ -1260,9 +1260,9 @@ class TokaMaker():
         @param zbounds Extents of grid in Z
         @param run_info Run information for EQDSK file (maximum of 36 characters)
         @param lcfs_pad Padding in normalized flux at LCFS
-        @param meshsearch Set > 100 if using a very fine gs mesh
-        @param maxsteps Field line tracer max number of steps (defaults to maxsteps+8e4)
-        @param ttol Field line tracer tolerance near separatrix
+        @param meshsearch Set > 100 if using a very fine gs mesh 
+        @param maxsteps Field line tracer max number of steps above default (8e4)
+        @param ttol Field line tracer tolerance near separatrix 
         '''
         cfilename = c_char_p(filename.encode())
         if len(run_info) > 36:
