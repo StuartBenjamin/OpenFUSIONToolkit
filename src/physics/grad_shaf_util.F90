@@ -1061,7 +1061,7 @@ end subroutine gs_save_decon
 !---------------------------------------------------------------------------
 !> Needs docs
 !---------------------------------------------------------------------------
-subroutine gs_save_ifile(gseq,filename,npsi,ntheta,error_str,meshsearch,maxsteps,ttol)
+subroutine gs_save_ifile(gseq,filename,npsi,ntheta,psi_pad,error_str,meshsearch,maxsteps,ttol)
 class(gs_eq), intent(inout) :: gseq
 CHARACTER(LEN=OFT_PATH_SLEN), intent(in) :: filename 
 integer(4), intent(in) :: npsi
@@ -1069,6 +1069,7 @@ integer(4), intent(in) :: ntheta
 integer(4), intent(inout) :: meshsearch
 integer(4), intent(in) :: maxsteps
 real(8), intent(in) :: ttol
+real(8), intent(in) :: psi_pad 
 CHARACTER(LEN=80), OPTIONAL, INTENT(out) :: error_str
 type(gsinv_interp), target :: field
 type(oft_lag_brinterp) :: psi_int
@@ -1093,8 +1094,8 @@ IF(gseq%plasma_bounds(1)>-1.d98)THEN
   x1=gseq%plasma_bounds(1); x2=gseq%plasma_bounds(2)
 END IF
 xr = (x2-x1)
-x1 = x1 + xr*1.d-3
-x2 = x2 - xr*1.d-3
+x1 = x1 + xr*psi_pad !x1 = x1 + xr*1.d-3
+                     !x2 = x2 - xr*1.d-3
 psi_int%u=>gseq%psi
 CALL psi_int%setup()
 !---Find Rmax along Zaxis
@@ -1123,9 +1124,9 @@ IF(oft_debug_print(1))THEN
 END IF
 !---Trace
 call set_tracer(1)
-ALLOCATE(cout(4,npsi))
-ALLOCATE(rout(npsi,ntheta))
-ALLOCATE(zout(npsi,ntheta))
+ALLOCATE(cout(4,0:npsi))
+ALLOCATE(rout(0:npsi,1:ntheta))
+ALLOCATE(zout(0:npsi,1:ntheta))
 !$omp parallel private(j,psi_surf,pt,ptout,field,rz,gop) firstprivate(pt_last)
 field%u=>gseq%psi
 CALL field%setup()
@@ -1138,7 +1139,7 @@ active_tracer%zaxis=zaxis
 active_tracer%inv=.TRUE.
 ALLOCATE(ptout(3,active_tracer%maxsteps+1))
 !$omp do schedule(dynamic,1)
-do j=1,npsi-1
+do j=0,npsi-1
   IF(PRESENT(error_str))THEN
     IF(error_str/="")CYCLE
   END IF
@@ -1233,20 +1234,23 @@ OPEN(NEWUNIT=io_unit,FILE=TRIM(filename),FORM='UNFORMATTED')
 !---------------------------------------------------------------------------
 ! Write array lengths: both 1 larger than gs_save_decon to match ifile
 !---------------------------------------------------------------------------
-WRITE(io_unit)INT(npsi,4),INT(ntheta,4)
+WRITE(io_unit)INT(npsi+1,4),INT(ntheta,4)
 !---------------------------------------------------------------------------
 ! Write out flux surface quantities: reversing order to gs_save_decon
-!                                    s.t. psi is increasing as in ifile
+!                            s.t. psi is going from axis to edge as in ifile
 ! cout(1,:) -> psi(mpsi:0) 
 ! cout(2,:) -> f(mpsi:0)
 ! cout(3,:) -> p(mpsi:0)
 ! cout(4,:) -> q(mpsi:0)
 !---------------------------------------------------------------------------
 DO j=1,4
-  WRITE(io_unit)cout(j,npsi:1:-1) 
+  WRITE(io_unit)cout(j,npsi:0:-1) 
 END DO
-rout_(1:npsi,1:ntheta)=rout(npsi:1:-1,1:ntheta)
-zout_(1:npsi,1:ntheta)=zout(npsi:1:-1,1:ntheta)
+ALLOCATE(rout_(0:npsi,1:ntheta))
+ALLOCATE(zout_(0:npsi,1:ntheta))
+rout_(0:npsi,1:ntheta)=rout(npsi:0:-1,1:ntheta)
+zout_(0:npsi,1:ntheta)=zout(npsi:0:-1,1:ntheta)
+DEALLOCATE(rout,zout)
 !---------------------------------------------------------------------------
 ! Imposing periodicity: same as read_eq_hansen_inverse in GPEC, ifile requirement? 
 !---------------------------------------------------------------------------
@@ -1260,8 +1264,11 @@ r(:,ntheta)=r(:,1)
 ! rout__ -> r(0:mtheta,mpsi:0)
 ! zout__ -> z(0:mtheta,mpsi:0)
 !---------------------------------------------------------------------------
+ALLOCATE(rout__(0:npsi,1:ntheta))
+ALLOCATE(zout__(0:npsi,1:ntheta))
 rout__=TRANSPOSE(rout_)
 zout__=TRANSPOSE(zout_)
+DEALLOCATE(rout_,zout_)
 WRITE(io_unit)rout__
 WRITE(io_unit)zout__
 !---------------------------------------------------------------------------
@@ -1277,7 +1284,7 @@ IF(oft_debug_print(1))THEN
 END IF
 CALL oft_decrease_indent
 !---
-DEALLOCATE(cout,rout,zout,rout_,zout_,rout__,zout__)
+DEALLOCATE(cout,rout__,zout__)
 end subroutine gs_save_ifile
 !---------------------------------------------------------------------------
 !> Save equilibrium to General Atomics gEQDSK file
