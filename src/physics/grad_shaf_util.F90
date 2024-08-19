@@ -929,7 +929,7 @@ do j=0,npsi-1
   !---------------------------------------------------------------------------
   ! Trace contour
   !---------------------------------------------------------------------------
-  psi_surf(1)=(x2-x1)*(1.d0-j/REAL(npsi,4))**2
+  psi_surf(1)=(x2-x1)*(1.d0-j/REAL(npsi,8))**2
   psi_surf(1)=x2 - psi_surf(1)
   IF(gseq%diverted.AND.(psi_surf(1)-x1)/(x2-x1)<0.02d0)THEN ! Use higher tracing tolerance near divertor
     IF(ttol.gt.1.d-10)THEN
