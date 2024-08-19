@@ -1291,7 +1291,7 @@ CHARACTER(LEN=OFT_PATH_SLEN), intent(in) :: limiter_file !< Path to limiter file
 REAL(8), intent(in) :: psi_pad !< Padding at LCFS in normalized units
 CHARACTER(LEN=80), OPTIONAL, INTENT(out) :: error_str
 !
-real(8) :: psi_surf,rmax,x1,x2,raxis,zaxis,xr
+real(8) :: psi_surf,rmax,x1,x2,x1_true,raxis,zaxis,xr
 real(8) :: pt(3),pt_last(3),f(3),psi_tmp(1),gop(3,3)
 type(oft_lag_brinterp) :: psi_int
 real(8), pointer :: ptout(:,:),rout(:),zout(:)
@@ -1323,7 +1323,8 @@ IF(gseq%plasma_bounds(1)>-1.d98)THEN
 END IF
 ! IF(gseq%diverted)THEN
   xr = (x2-x1)
-  x1 = x1 + xr*psi_pad !0.001d0
+  x1_true=x1 !true boundary psi
+  x1 = x1 + xr*psi_pad !shifted boundary psi used for all q-grids
   ! x2 = x2 - xr*1.d-3
 ! END IF
 psi_int%u=>gseq%psi
@@ -1374,8 +1375,8 @@ do j=1,nr
   !---------------------------------------------------------------------------
   ! Trace contour
   !---------------------------------------------------------------------------
-  psi_surf=(x2-x1)*((j-1)/REAL(nr-1,8))! + x1!**2
-  psi_surf=x2 - psi_surf
+  psi_surf=(x2-x1)*((j-1)/REAL(nr-1,8))! + x1!**2  !from 0 to 1 times (x2-x1)
+  psi_surf=x2 - psi_surf  !psi_surf goes from from x2 (~1) to x1, but not quite to x1_true (psi on separatrix)
   IF(gseq%diverted.AND.(psi_surf-x1)/(x2-x1)<0.02d0)THEN ! Use higher tracing tolerance near divertor
     IF(ttol.gt.1.d-10)THEN
       active_tracer%tol=1.d-10
@@ -1401,7 +1402,7 @@ do j=1,nr
     IF(active_tracer%status/=1)THEN
       IF(PRESENT(error_str))THEN
         !$omp critical
-        WRITE(error_str,"(A,F10.4)")"Tracing failed at psi = ",1.d0-(psi_surf-x1)/(x2-x1)
+        WRITE(error_str,"(A,F20.16)")"Tracing failed at psi = ",1.d0-(psi_surf-x1)/(x2-x1)
         !$omp end critical
         CYCLE
       ELSE
@@ -1514,9 +1515,9 @@ END IF
 OPEN(NEWUNIT=io_unit,FILE=TRIM(filename))
 WRITE (io_unit,2000) eqdsk_case,0,nr,nz
 WRITE (io_unit,2020) rdim,zdim,raxis,rleft,zmid
-WRITE (io_unit,2020) raxis,zaxis,x2,x1,bcentr
+WRITE (io_unit,2020) raxis,zaxis,x2,x1_true,bcentr 
 WRITE (io_unit,2020) itor,x2,xdum,raxis,xdum
-WRITE (io_unit,2020) zaxis,xdum,x1,xdum,xdum
+WRITE (io_unit,2020) zaxis,xdum,x1_true,xdum,xdum
 WRITE (io_unit,2020) (fpol(i),i=1,nr)
 WRITE (io_unit,2020) (pres(i),i=1,nr)
 WRITE (io_unit,2020) (ffprim(i),i=1,nr)
@@ -1529,7 +1530,7 @@ WRITE (io_unit,2020) (rlim(i),zlim(i),i=1,nlim)
 CLOSE (io_unit)
 !---
 IF(oft_debug_print(1))THEN
-  WRITE(*,'(2A,2ES11.3)')oft_indent,'Psi  = ',x1,x2
+  WRITE(*,'(2A,3ES11.3)')oft_indent,'Psi  = ',x1_true,x1,x2
   WRITE(*,'(2A,ES11.3)')oft_indent,'Qmin = ',MINVAL(qpsi)
   WRITE(*,'(2A,ES11.3)')oft_indent,'Qmax = ',MAXVAL(qpsi)
   ! WRITE(*,'(2A)')oft_indent,'Done'
