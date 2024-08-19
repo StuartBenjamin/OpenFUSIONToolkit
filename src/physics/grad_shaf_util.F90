@@ -845,7 +845,7 @@ END SUBROUTINE gs_analyze
 !---------------------------------------------------------------------------
 !> Needs docs
 !---------------------------------------------------------------------------
-subroutine gs_save_decon(gseq,filename,npsi,ntheta,error_str,meshsearch,maxsteps,ttol)
+subroutine gs_save_decon(gseq,filename,npsi,ntheta,psi_pad,error_str,meshsearch,maxsteps,ttol)
 class(gs_eq), intent(inout) :: gseq
 CHARACTER(LEN=OFT_PATH_SLEN), intent(in) :: filename 
 integer(4), intent(in) :: npsi
@@ -853,11 +853,12 @@ integer(4), intent(in) :: ntheta
 integer(4), intent(inout) :: meshsearch
 integer(4), intent(in) :: maxsteps
 real(8), intent(in) :: ttol
+real(8), intent(in) :: psi_pad 
 CHARACTER(LEN=80), OPTIONAL, INTENT(out) :: error_str
 type(gsinv_interp), target :: field
 type(oft_lag_brinterp) :: psi_int
 real(8) :: gop(3,3),psi_surf(1),pt_last(3)
-real(8) :: raxis,zaxis,f(3),pt(3),rmax,x1,x2,xr
+real(8) :: raxis,zaxis,f(3),pt(3),rmax,x1,x1_true,x2,xr
 real(8), allocatable :: ptout(:,:)
 real(4), allocatable :: rout(:,:),zout(:,:),cout(:,:)
 real(8), parameter :: tol=1.d-10
@@ -875,8 +876,9 @@ IF(gseq%plasma_bounds(1)>-1.d98)THEN
   x1=gseq%plasma_bounds(1); x2=gseq%plasma_bounds(2)
 END IF
 xr = (x2-x1)
-x1 = x1 + xr*1.d-3
-x2 = x2 - xr*1.d-3
+x1_true=x1
+x1 = x1 + xr*psi_pad !x1 = x1 + xr*1.d-3
+                     !x2 = x2 - xr*1.d-3
 psi_int%u=>gseq%psi
 CALL psi_int%setup()
 !---Find Rmax along Zaxis
@@ -905,9 +907,9 @@ IF(oft_debug_print(1))THEN
 END IF
 !---Trace
 call set_tracer(1)
-ALLOCATE(cout(4,npsi))
-ALLOCATE(rout(npsi,ntheta))
-ALLOCATE(zout(npsi,ntheta))
+ALLOCATE(cout(4,0:npsi))
+ALLOCATE(rout(0:npsi,1:ntheta))
+ALLOCATE(zout(0:npsi,1:ntheta))
 !$omp parallel private(j,psi_surf,pt,ptout,field,rz,gop) firstprivate(pt_last)
 field%u=>gseq%psi
 CALL field%setup()
@@ -920,7 +922,7 @@ active_tracer%zaxis=zaxis
 active_tracer%inv=.TRUE.
 ALLOCATE(ptout(3,active_tracer%maxsteps+1))
 !$omp do schedule(dynamic,1)
-do j=1,npsi-1
+do j=0,npsi-1
   IF(PRESENT(error_str))THEN
     IF(error_str/="")CYCLE
   END IF
@@ -1015,7 +1017,11 @@ OPEN(NEWUNIT=io_unit,FILE=TRIM(filename),FORM='UNFORMATTED')
 !---------------------------------------------------------------------------
 ! Write array lengths
 !---------------------------------------------------------------------------
-WRITE(io_unit)INT(npsi-1,4),INT(ntheta-1,4)
+WRITE(io_unit)INT(npsi,4),INT(ntheta-1,4)
+!---------------------------------------------------------------------------
+! Write true psi bounds of equilibrium (edge bound,axis bound)
+!---------------------------------------------------------------------------
+WRITE(io_unit)FLOAT(x1_true,8),FLOAT(x2,8)
 !---------------------------------------------------------------------------
 ! Write out flux surface quantities
 !
