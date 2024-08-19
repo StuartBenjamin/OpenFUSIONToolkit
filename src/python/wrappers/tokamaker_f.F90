@@ -29,7 +29,7 @@ USE oft_gs, ONLY: gs_eq, gs_save_fields, gs_save_fgrid, gs_setup_walls, build_de
   gs_fixed_vflux, gs_load_regions, gs_get_qprof, gs_trace_surf, gs_b_interp, gs_prof_interp, &
   gs_plasma_mutual, gs_source
 USE oft_gs_util, ONLY: gs_save, gs_load, gs_analyze, gs_comp_globals, gs_save_eqdsk, &
-  gs_profile_load, sauter_fc, gs_calc_vloop
+  gs_profile_load, sauter_fc, gs_calc_vloop, gs_save_decon, gs_save_ifile
 USE oft_gs_fit, ONLY: fit_gs, fit_pm
 USE oft_gs_td, ONLY: oft_tmaker_td, eig_gs_td
 USE oft_base_f, ONLY: copy_string, copy_string_rev, oftpy_init
@@ -940,4 +940,40 @@ lim_file='none'
 CALL gs_save_eqdsk(gs_global,filename_tmp,nr,nz,rbounds,zbounds,run_info_f,lim_file,psi_pad,error_flag,meshsearch,maxsteps,ttol)
 CALL copy_string(TRIM(error_flag),error_str)
 END SUBROUTINE tokamaker_save_eqdsk
+!------------------------------------------------------------------------------
+!> Needs docs
+!------------------------------------------------------------------------------
+SUBROUTINE tokamaker_save_decon(filename,npsi,ntheta,psi_pad,error_str,meshsearch,maxsteps,ttol,gpow) BIND(C,NAME="tokamaker_save_decon")
+CHARACTER(KIND=c_char), INTENT(in) :: filename(80) !< Needs docs
+INTEGER(c_int), VALUE, INTENT(in) :: npsi !< Needs docs
+INTEGER(c_int), VALUE, INTENT(in) :: ntheta !< Needs docs
+INTEGER(c_int), VALUE, INTENT(in) :: meshsearch !< Needs docs
+INTEGER(c_int), VALUE, INTENT(in) :: maxsteps !< Needs docs
+INTEGER(c_int), VALUE, INTENT(in) :: gpow !< Needs docs
+REAL(c_double), VALUE, INTENT(in) :: psi_pad !< Needs docs
+REAL(c_double), VALUE, INTENT(in) :: ttol !< Needs docs
+CHARACTER(KIND=c_char), INTENT(out) :: error_str(80) !< Needs docs
+CHARACTER(LEN=80) :: filename_tmp,error_flag
+CALL copy_string_rev(filename,filename_tmp)
+CALL gs_save_decon(gs_global,filename_tmp,npsi,ntheta,psi_pad,error_flag,meshsearch,maxsteps,ttol,gpow)
+CALL copy_string(TRIM(error_flag),error_str)
+END SUBROUTINE tokamaker_save_decon
+!------------------------------------------------------------------------------
+!> Needs docs
+!------------------------------------------------------------------------------
+SUBROUTINE tokamaker_save_ifile(filename,npsi,ntheta,psi_pad,error_str,meshsearch,maxsteps,ttol,gpow) BIND(C,NAME="tokamaker_save_ifile")
+CHARACTER(KIND=c_char), INTENT(in) :: filename(80) !< Needs docs
+INTEGER(c_int), VALUE, INTENT(in) :: npsi !< Needs docs
+INTEGER(c_int), VALUE, INTENT(in) :: ntheta !< Needs docs
+INTEGER(c_int), VALUE, INTENT(in) :: meshsearch !< Needs docs
+INTEGER(c_int), VALUE, INTENT(in) :: maxsteps !< Needs docs
+INTEGER(c_int), VALUE, INTENT(in) :: gpow !< Needs docs
+REAL(c_double), VALUE, INTENT(in) :: psi_pad !< Needs docs
+REAL(c_double), VALUE, INTENT(in) :: ttol !< Needs docs
+CHARACTER(KIND=c_char), INTENT(out) :: error_str(80) !< Needs docs
+CHARACTER(LEN=80) :: filename_tmp,error_flag
+CALL copy_string_rev(filename,filename_tmp)
+CALL gs_save_ifile(gs_global,filename_tmp,npsi,ntheta,psi_pad,error_flag,meshsearch,maxsteps,ttol,gpow)
+CALL copy_string(TRIM(error_flag),error_str)
+END SUBROUTINE tokamaker_save_ifile
 END MODULE tokamaker_f
