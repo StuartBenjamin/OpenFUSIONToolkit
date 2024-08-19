@@ -845,13 +845,14 @@ END SUBROUTINE gs_analyze
 !---------------------------------------------------------------------------
 !> Needs docs
 !---------------------------------------------------------------------------
-subroutine gs_save_decon(gseq,filename,npsi,ntheta,psi_pad,error_str,meshsearch,maxsteps,ttol)
+subroutine gs_save_decon(gseq,filename,npsi,ntheta,psi_pad,error_str,meshsearch,maxsteps,ttol,gpow)
 class(gs_eq), intent(inout) :: gseq
 CHARACTER(LEN=OFT_PATH_SLEN), intent(in) :: filename 
 integer(4), intent(in) :: npsi
 integer(4), intent(in) :: ntheta
 integer(4), intent(inout) :: meshsearch
 integer(4), intent(in) :: maxsteps
+integer(4), intent(in) :: gpow
 real(8), intent(in) :: ttol
 real(8), intent(in) :: psi_pad 
 CHARACTER(LEN=80), OPTIONAL, INTENT(out) :: error_str
@@ -860,9 +861,10 @@ type(oft_lag_brinterp) :: psi_int
 real(8) :: gop(3,3),psi_surf(1),pt_last(3)
 real(8) :: raxis,zaxis,f(3),pt(3),rmax,x1,x1_true,x2,xr
 real(8), allocatable :: ptout(:,:)
+real(8), allocatable :: psi_grid(:)
 real(8), allocatable :: rout(:,:),zout(:,:),cout(:,:)
 real(8), parameter :: tol=1.d-10
-integer(4) :: j,k,cell,io_unit
+integer(4) :: j,k,cell,io_unit,ipsi
 TYPE(spline_type) :: rz
 !---
 IF(PRESENT(error_str))error_str=""
@@ -905,6 +907,21 @@ IF(oft_debug_print(1))THEN
   WRITE(*,'(2A,ES11.3)')oft_indent,'Rmax = ',rmax
   CALL oft_decrease_indent
 END IF
+!---Custom grid type, must go from 1.0 to 0.0 (see default)
+ALLOCATE(psi_grid(0:npsi))
+IF(gpow>0)THEN
+  xdx = powspace(0.d0, 1.d0, gpow, npsi+1, "lower")
+  psi_grid=xdx(1,:)
+ELSEIF(gpow==-1)!CASE("ldp")
+  psi_grid=(/(ipsi,ipsi=0,npsi)/)/REAL(npsi,8)
+  psi_grid=SIN(psi_grid*pi/2)**2
+  psi_grid=1.d0-psi_grid
+ELSEIF(gpow==-2)!CASE("rho")
+  psi_grid=(/(ipsi**2,ipsi=0,npsi)/)/(npsi)**2
+  psi_grid=1.d0-psi_grid
+ELSE!CASE default
+  psi_grid=(/((1.d0-ipsi/REAL(npsi,8))**2,ipsi=0,npsi)/)
+ENDIF
 !---Trace
 call set_tracer(1)
 ALLOCATE(cout(4,0:npsi))
@@ -929,7 +946,7 @@ do j=0,npsi-1
   !---------------------------------------------------------------------------
   ! Trace contour
   !---------------------------------------------------------------------------
-  psi_surf(1)=(x2-x1)*(1.d0-j/REAL(npsi,8))**2
+  psi_surf(1)=(x2-x1)*psi_grid(j)
   psi_surf(1)=x2 - psi_surf(1)
   IF(gseq%diverted.AND.(psi_surf(1)-x1)/(x2-x1)<0.02d0)THEN ! Use higher tracing tolerance near divertor
     IF(ttol.gt.1.d-10)THEN
