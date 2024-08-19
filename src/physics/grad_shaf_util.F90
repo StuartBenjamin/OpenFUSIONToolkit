@@ -860,7 +860,7 @@ type(oft_lag_brinterp) :: psi_int
 real(8) :: gop(3,3),psi_surf(1),pt_last(3)
 real(8) :: raxis,zaxis,f(3),pt(3),rmax,x1,x1_true,x2,xr
 real(8), allocatable :: ptout(:,:)
-real(4), allocatable :: rout(:,:),zout(:,:),cout(:,:)
+real(8), allocatable :: rout(:,:),zout(:,:),cout(:,:)
 real(8), parameter :: tol=1.d-10
 integer(4) :: j,k,cell,io_unit
 TYPE(spline_type) :: rz
