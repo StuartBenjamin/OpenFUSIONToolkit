@@ -1281,36 +1281,56 @@ class TokaMaker():
         if cstring.value != b'':
             raise Exception(cstring.value)
 
-    def save_GPEC_input(self,filename,npsi=256,ntheta=512,lcfs_pad=0.01,meshsearch=0,maxsteps=0,ttol=1e-10,gpow=0):
+    def save_GPEC_input(self,filename,npsi=256,psi=None,ntheta=512,lcfs_pad=0.01,meshsearch=0,maxsteps=0,ttol=1e-10,gpow=-1):
         '''! Save current equilibrium to GPEC format used in read_eq_hansen_inverse
 
         @param filename Filename to save DCON input file to
         @param npsi Number of radial sampling points
+        @param psi Explicit samplng locations in normalised \f$\hat{\psi}\f$ (should go from 0.0 to 1.0)
         @param ptheta Number of poloidal angle sampling points
         @param lcfs_pad Padding in normalized flux at LCFS
         @param meshsearch Set > 100 if more than ~100 cells between axis and LCFS
         @param maxsteps Field line tracer max number of steps above default (8e4)
         @param ttol Field line tracer tolerance near separatrix 
-        @param gpow Custom option for psi grid sampling (see gs_save_decon function for details)
+        @param gpow Built in fortran options for psi grid sampling (see gs_save_decon function for details)
         '''
+        if psi is not None:
+            if gpow != -1:
+                print('Warning: Input psi-grid will override psi grid specified by gpow')
+            gpow=0
+            if len(psi) != (npsi+1):
+                Exception('psi input must be of length npsi+1')
+        else:
+            #initialising psi grid of zeros (gpow will take precedence)
+            psi = numpy.linspace(0.0,0.0,npsi+1,dtype=numpy.float64)
         cfilename = c_char_p(filename.encode())
         cstring = c_char_p(b""*200)
         tokamaker_save_decon(cfilename,c_int(npsi),c_int(ntheta),c_double(lcfs_pad),cstring,c_int(meshsearch),c_int(maxsteps),c_double(ttol),c_int(gpow))
         if cstring.value != b'':
             raise Exception(cstring.value)
 
-    def save_ifile(self,filename,npsi=256,ntheta=512,lcfs_pad=0.01,meshsearch=0,maxsteps=0,ttol=1e-10,gpow=0):
+    def save_ifile(self,filename,npsi=256,psi=None,ntheta=512,lcfs_pad=0.01,meshsearch=0,maxsteps=0,ttol=1e-10,gpow=-1):
         '''! Save current equilibrium to L. Don Pearlstein's ifile format
 
         @param filename Filename to save ifile to
         @param npsi Number of radial sampling points
+        @param psi Explicit samplng locations in normalised \f$\hat{\psi}\f$ (should go from 0.0 to 1.0)
         @param ptheta Number of poloidal angle sampling points
         @param lcfs_pad Padding in normalized flux at LCFS
         @param meshsearch Set > 100 if more than ~100 cells between axis and LCFS
         @param maxsteps Field line tracer max number of steps above default (8e4)
         @param ttol Field line tracer tolerance near separatrix 
-        @param gpow Custom option for psi grid sampling (see gs_save_ifile function for details)
+        @param gpow Built in fortran options for psi grid sampling (see gs_save_ifile function for details)
         '''
+        if psi is not None:
+            if gpow != -1:
+                print('Warning: Input psi-grid will override psi grid specified by gpow')
+            gpow=0
+            if len(psi) != (npsi+1):
+                Exception('psi input must be of length npsi+1')
+        else:
+            #initialising psi grid of zeros (gpow will take precedence)
+            psi = numpy.linspace(0.0,0.0,npsi+1,dtype=numpy.float64)
         cfilename = c_char_p(filename.encode())
         cstring = c_char_p(b""*200)
         tokamaker_save_ifile(cfilename,c_int(npsi),c_int(ntheta),c_double(lcfs_pad),cstring,c_int(meshsearch),c_int(maxsteps),c_double(ttol),c_int(gpow))

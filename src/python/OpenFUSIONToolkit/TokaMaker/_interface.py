@@ -202,11 +202,11 @@ tokamaker_save_eqdsk = ctypes_subroutine(oftpy_lib.tokamaker_save_eqdsk, #(filen
     [c_char_p, c_int, c_int, ctypes_numpy_array(numpy.float64,1), ctypes_numpy_array(numpy.float64,1), c_char_p, c_double, c_char_p, c_int, c_int, c_double])
 ## @endcond
 
-tokamaker_save_decon = ctypes_subroutine(oftpy_lib.tokamaker_save_decon, #(filename,npsi,ntheta,psi_pad,error_str,meshsearch,maxsteps,ttol,gpow)
-    [c_char_p, c_int, c_int, c_double, c_char_p, c_int, c_int, c_double, c_int])
+tokamaker_save_decon = ctypes_subroutine(oftpy_lib.tokamaker_save_decon, #(filename,npsi,psi_in,ntheta,psi_pad,error_str,meshsearch,maxsteps,ttol,gpow)
+    [c_char_p, c_int, ctypes_numpy_array(numpy.float64,1), c_int, c_double, c_char_p, c_int, c_int, c_double, c_int])
 
-tokamaker_save_ifile = ctypes_subroutine(oftpy_lib.tokamaker_save_ifile, #(filename,npsi,ntheta,psi_pad,error_str,meshsearch,maxsteps,ttol,gpow)
-    [c_char_p, c_int, c_int, c_double, c_char_p, c_int, c_int, c_double, c_int])
+tokamaker_save_ifile = ctypes_subroutine(oftpy_lib.tokamaker_save_ifile, #(filename,npsi,psi_in,ntheta,psi_pad,error_str,meshsearch,maxsteps,ttol,gpow)
+    [c_char_p, c_int, ctypes_numpy_array(numpy.float64,1), c_int, c_double, c_char_p, c_int, c_int, c_double, c_int])
 
 class TokaMaker_field_interpolator():
     '''! Interpolation class for Grad-Shafranov fields'''

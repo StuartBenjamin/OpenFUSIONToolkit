@@ -943,9 +943,10 @@ END SUBROUTINE tokamaker_save_eqdsk
 !------------------------------------------------------------------------------
 !> Needs docs
 !------------------------------------------------------------------------------
-SUBROUTINE tokamaker_save_decon(filename,npsi,ntheta,psi_pad,error_str,meshsearch,maxsteps,ttol,gpow) BIND(C,NAME="tokamaker_save_decon")
+SUBROUTINE tokamaker_save_decon(filename,npsi,psi_in,ntheta,psi_pad,error_str,meshsearch,maxsteps,ttol,gpow) BIND(C,NAME="tokamaker_save_decon")
 CHARACTER(KIND=c_char), INTENT(in) :: filename(80) !< Needs docs
 INTEGER(c_int), VALUE, INTENT(in) :: npsi !< Needs docs
+REAL(c_double), INTENT(in) :: psi_in(0:npsi) !< Needs docs
 INTEGER(c_int), VALUE, INTENT(in) :: ntheta !< Needs docs
 INTEGER(c_int), VALUE, INTENT(in) :: meshsearch !< Needs docs
 INTEGER(c_int), VALUE, INTENT(in) :: maxsteps !< Needs docs
@@ -955,15 +956,16 @@ REAL(c_double), VALUE, INTENT(in) :: ttol !< Needs docs
 CHARACTER(KIND=c_char), INTENT(out) :: error_str(80) !< Needs docs
 CHARACTER(LEN=80) :: filename_tmp,error_flag
 CALL copy_string_rev(filename,filename_tmp)
-CALL gs_save_decon(gs_global,filename_tmp,npsi,ntheta,psi_pad,error_flag,meshsearch,maxsteps,ttol,gpow)
+CALL gs_save_decon(gs_global,filename_tmp,npsi,psi_in,ntheta,psi_pad,error_flag,meshsearch,maxsteps,ttol,gpow)
 CALL copy_string(TRIM(error_flag),error_str)
 END SUBROUTINE tokamaker_save_decon
 !------------------------------------------------------------------------------
 !> Needs docs
 !------------------------------------------------------------------------------
-SUBROUTINE tokamaker_save_ifile(filename,npsi,ntheta,psi_pad,error_str,meshsearch,maxsteps,ttol,gpow) BIND(C,NAME="tokamaker_save_ifile")
+SUBROUTINE tokamaker_save_ifile(filename,npsi,psi_in,ntheta,psi_pad,error_str,meshsearch,maxsteps,ttol,gpow) BIND(C,NAME="tokamaker_save_ifile")
 CHARACTER(KIND=c_char), INTENT(in) :: filename(80) !< Needs docs
 INTEGER(c_int), VALUE, INTENT(in) :: npsi !< Needs docs
+REAL(c_double), INTENT(in) :: psi_in(0:npsi) !< Needs docs
 INTEGER(c_int), VALUE, INTENT(in) :: ntheta !< Needs docs
 INTEGER(c_int), VALUE, INTENT(in) :: meshsearch !< Needs docs
 INTEGER(c_int), VALUE, INTENT(in) :: maxsteps !< Needs docs
@@ -973,7 +975,7 @@ REAL(c_double), VALUE, INTENT(in) :: ttol !< Needs docs
 CHARACTER(KIND=c_char), INTENT(out) :: error_str(80) !< Needs docs
 CHARACTER(LEN=80) :: filename_tmp,error_flag
 CALL copy_string_rev(filename,filename_tmp)
-CALL gs_save_ifile(gs_global,filename_tmp,npsi,ntheta,psi_pad,error_flag,meshsearch,maxsteps,ttol,gpow)
+CALL gs_save_ifile(gs_global,filename_tmp,npsi,psi_in,ntheta,psi_pad,error_flag,meshsearch,maxsteps,ttol,gpow)
 CALL copy_string(TRIM(error_flag),error_str)
 END SUBROUTINE tokamaker_save_ifile
 END MODULE tokamaker_f

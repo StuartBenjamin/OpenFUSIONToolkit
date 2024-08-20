@@ -845,10 +845,11 @@ END SUBROUTINE gs_analyze
 !---------------------------------------------------------------------------
 !> Needs docs
 !---------------------------------------------------------------------------
-subroutine gs_save_decon(gseq,filename,npsi,ntheta,psi_pad,error_str,meshsearch,maxsteps,ttol,gpow)
+subroutine gs_save_decon(gseq,filename,npsi,psi_in,ntheta,psi_pad,error_str,meshsearch,maxsteps,ttol,gpow)
 class(gs_eq), intent(inout) :: gseq
 CHARACTER(LEN=OFT_PATH_SLEN), intent(in) :: filename 
 integer(4), intent(in) :: npsi
+real(8), optional, intent(in) :: psi_in(0:npsi)
 integer(4), intent(in) :: ntheta
 integer(4), intent(in) :: meshsearch
 integer(4), intent(in) :: maxsteps
@@ -910,15 +911,18 @@ IF(oft_debug_print(1))THEN
   CALL oft_decrease_indent
 END IF
 !---Custom grid type, must go from 1.0 to 0.0 (see default)
+!---To pack separatrix, pack at start of grid, near 1.0
 ALLOCATE(psi_grid(0:npsi))
 IF(gpow>0)THEN
   xdx = powspace(0.d0, 1.d0, gpow, npsi+1, "lower")
   psi_grid(:)=xdx(1,:)
-ELSEIF(gpow==-1)THEN!CASE("ldp")
+ELSEIF(gpow==0)THEN
+  psi_grid(0:npsi)=psi_in(npsi:0:-1)
+ELSEIF(gpow==-2)THEN!CASE("ldp")
   psi_grid=(/(ipsi,ipsi=0,npsi)/)/REAL(npsi,8)
   psi_grid=SIN(psi_grid*pi/2)**2
   psi_grid=1.d0-psi_grid
-ELSEIF(gpow==-2)THEN!CASE("rho")
+ELSEIF(gpow==-3)THEN!CASE("rho")
   psi_grid=(/(ipsi**2,ipsi=0,npsi)/)/(npsi)**2
   psi_grid=1.d0-psi_grid
 ELSE!CASE default
@@ -1079,10 +1083,11 @@ end subroutine gs_save_decon
 !---------------------------------------------------------------------------
 !> Needs docs
 !---------------------------------------------------------------------------
-subroutine gs_save_ifile(gseq,filename,npsi,ntheta,psi_pad,error_str,meshsearch,maxsteps,ttol,gpow)
+subroutine gs_save_ifile(gseq,filename,npsi,psi_in,ntheta,psi_pad,error_str,meshsearch,maxsteps,ttol,gpow)
 class(gs_eq), intent(inout) :: gseq
 CHARACTER(LEN=OFT_PATH_SLEN), intent(in) :: filename 
 integer(4), intent(in) :: npsi
+real(8), intent(in) :: psi_in(0:npsi)
 integer(4), intent(in) :: ntheta
 integer(4), intent(in) :: meshsearch
 integer(4), intent(in) :: maxsteps
@@ -1145,15 +1150,18 @@ IF(oft_debug_print(1))THEN
   CALL oft_decrease_indent
 END IF
 !---Custom grid type, must go from 1.0 to 0.0 (see default)
+!---To pack separatrix, pack at start of grid, near 1.0
 ALLOCATE(psi_grid(0:npsi))
 IF(gpow>0)THEN
   xdx = powspace(0.d0, 1.d0, gpow, npsi+1, "lower")
   psi_grid(:)=xdx(1,:)
-ELSEIF(gpow==-1)THEN!CASE("ldp")
+ELSEIF(gpow==0)THEN
+  psi_grid(0:npsi)=psi_in(npsi:0:-1)
+ELSEIF(gpow==-2)THEN!CASE("ldp")
   psi_grid=(/(ipsi,ipsi=0,npsi)/)/REAL(npsi,8)
   psi_grid=SIN(psi_grid*pi/2)**2
   psi_grid=1.d0-psi_grid
-ELSEIF(gpow==-2)THEN!CASE("rho")
+ELSEIF(gpow==-3)THEN!CASE("rho")
   psi_grid=(/(ipsi**2,ipsi=0,npsi)/)/(npsi)**2
   psi_grid=1.d0-psi_grid
 ELSE!CASE default
