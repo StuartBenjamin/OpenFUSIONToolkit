@@ -71,6 +71,7 @@ LOGICAL :: limited_only = .FALSE.
 CHARACTER(LEN=OFT_PATH_SLEN) :: coil_file = 'none'
 CHARACTER(LEN=OFT_PATH_SLEN) :: limiter_file = 'none'
 CHARACTER(LEN=OFT_PATH_SLEN) :: eqdsk_filename = 'gTokaMaker'
+CHARACTER(LEN=OFT_PATH_SLEN) :: decon_filename = 'Psitri.dci'
 CHARACTER(LEN=36) :: eqdsk_run_info = ''
 CHARACTER(LEN=OFT_PATH_SLEN) :: eqdsk_limiter_file = 'none'
 !---Fit Input options
@@ -261,7 +262,8 @@ END IF
 !---Save DCON/EQDSK files
 IF(has_plasma)THEN
   IF((dcon_npsi>0).AND.(dcon_ntheta>0))THEN
-    CALL gs_save_decon(mygs,dcon_npsi,dcon_ntheta)
+    !CALL gs_save_decon(mygs,dcon_npsi,dcon_ntheta)(gseq,filename,npsi,ntheta,psi_pad,error_str,meshsearch,maxsteps,ttol,gpow)
+    CALL gs_save_decon(gseq=mygs,filename=decon_filename,npsi=dcon_npsi,ntheta=dcon_ntheta,psi_pad=1.d-3,meshsearch=meshsearch,maxsteps=maxsteps,ttol=1.d-10,gpow=-1)
   END IF
   IF((eqdsk_nr>0).AND.(eqdsk_nz>0))THEN
     IF(ANY(eqdsk_rbounds<0.d0))CALL oft_abort('Invalid or unset EQDSK radial extents', &
