@@ -39,6 +39,8 @@ INTEGER(4) :: dcon_npsi = -1
 INTEGER(4) :: dcon_ntheta = -1
 INTEGER(4) :: eqdsk_nr = -1
 INTEGER(4) :: eqdsk_nz = -1
+INTEGER(4) :: meshsearch = 0
+INTEGER(4) :: maxsteps = 0
 LOGICAL :: pm = .FALSE.
 REAL(8) :: urf = .3d0
 REAL(8) :: nl_tol = 1.d-6
@@ -267,7 +269,7 @@ IF(has_plasma)THEN
     IF(ANY(ABS(eqdsk_zbounds)>1.d90))CALL oft_abort('Invalid or unset EQDSK vertical extents', &
                                               'tokamaker_fit',__FILE__)
     CALL gs_save_eqdsk(mygs,eqdsk_filename,eqdsk_nr,eqdsk_nz,eqdsk_rbounds,eqdsk_zbounds, &
-      eqdsk_run_info,eqdsk_limiter_file,eqdsk_lcfs_pad)
+      eqdsk_run_info,eqdsk_limiter_file,eqdsk_lcfs_pad,meshsearch,maxsteps,1.d-10)
   END IF
 END IF
 !---------------------------------------------------------------------------
