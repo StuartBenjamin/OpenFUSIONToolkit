@@ -850,7 +850,7 @@ class(gs_eq), intent(inout) :: gseq
 CHARACTER(LEN=OFT_PATH_SLEN), intent(in) :: filename 
 integer(4), intent(in) :: npsi
 integer(4), intent(in) :: ntheta
-integer(4), intent(inout) :: meshsearch
+integer(4), intent(in) :: meshsearch
 integer(4), intent(in) :: maxsteps
 integer(4), intent(in) :: gpow
 real(8), intent(in) :: ttol
@@ -865,7 +865,7 @@ real(8), allocatable :: psi_grid(:)
 real(8), allocatable :: xdx(:,:)
 real(8), allocatable :: rout(:,:),zout(:,:),cout(:,:)
 real(8), parameter :: tol=1.d-10
-integer(4) :: j,k,cell,io_unit,ipsi
+integer(4) :: j,k,cell,io_unit,ipsi,meshsearch_
 TYPE(spline_type) :: rz
 !---
 IF(PRESENT(error_str))error_str=""
@@ -887,11 +887,12 @@ CALL psi_int%setup()
 !---Find Rmax along Zaxis
 rmax=raxis
 cell=0
-IF(meshsearch<100)THEN
-  meshsearch=100
+meshsearch_=meshsearch
+IF(meshsearch_<100)THEN
+  meshsearch_=100
 END IF
-DO j=1,meshsearch 
-  pt=[(gseq%rmax-raxis)*j/REAL(meshsearch,8)+raxis,zaxis,0.d0]
+DO j=1,meshsearch_ 
+  pt=[(gseq%rmax-raxis)*j/REAL(meshsearch_,8)+raxis,zaxis,0.d0]
   CALL bmesh_findcell(smesh,cell,pt,f)
   IF( (MAXVAL(f)>1.d0+tol) .OR. (MINVAL(f)<-tol) )EXIT
   CALL psi_int%interp(cell,f,gop,psi_surf)
@@ -933,8 +934,7 @@ field%u=>gseq%psi
 CALL field%setup()
 active_tracer%neq=3
 active_tracer%B=>field
-maxsteps=maxsteps+8e4
-active_tracer%maxsteps=maxsteps
+active_tracer%maxsteps=maxsteps+INT(8e4,4)
 active_tracer%raxis=raxis
 active_tracer%zaxis=zaxis
 active_tracer%inv=.TRUE.
@@ -1039,7 +1039,7 @@ WRITE(io_unit)INT(npsi,4),INT(ntheta-1,4)
 !---------------------------------------------------------------------------
 ! Write true psi bounds of equilibrium (edge bound,axis bound)
 !---------------------------------------------------------------------------
-WRITE(io_unit)FLOAT(x1_true,8),FLOAT(x2,8)
+WRITE(io_unit)REAL(x1_true,8),REAL(x2,8)
 !---------------------------------------------------------------------------
 ! Write out flux surface quantities
 !
@@ -1084,7 +1084,7 @@ class(gs_eq), intent(inout) :: gseq
 CHARACTER(LEN=OFT_PATH_SLEN), intent(in) :: filename 
 integer(4), intent(in) :: npsi
 integer(4), intent(in) :: ntheta
-integer(4), intent(inout) :: meshsearch
+integer(4), intent(in) :: meshsearch
 integer(4), intent(in) :: maxsteps
 integer(4), intent(in) :: gpow
 real(8), intent(in) :: ttol
@@ -1101,7 +1101,7 @@ real(8), allocatable :: rout__(:,:),zout__(:,:)
 real(8), allocatable :: xdx(:,:)
 real(8), allocatable :: psi_grid(:)
 real(8), parameter :: tol=1.d-10
-integer(4) :: j,k,cell,io_unit,ipsi
+integer(4) :: j,k,cell,io_unit,ipsi,meshsearch_
 TYPE(spline_type) :: rz
 !---
 IF(PRESENT(error_str))error_str=""
@@ -1122,11 +1122,12 @@ CALL psi_int%setup()
 !---Find Rmax along Zaxis
 rmax=raxis
 cell=0
-IF(meshsearch<100)THEN
-  meshsearch=100
+meshsearch_=meshsearch
+IF(meshsearch_<100)THEN
+  meshsearch_=100
 END IF
-DO j=1,meshsearch 
-  pt=[(gseq%rmax-raxis)*j/REAL(meshsearch,8)+raxis,zaxis,0.d0]
+DO j=1,meshsearch_ 
+  pt=[(gseq%rmax-raxis)*j/REAL(meshsearch_,8)+raxis,zaxis,0.d0]
   CALL bmesh_findcell(smesh,cell,pt,f)
   IF( (MAXVAL(f)>1.d0+tol) .OR. (MINVAL(f)<-tol) )EXIT
   CALL psi_int%interp(cell,f,gop,psi_surf)
@@ -1168,8 +1169,7 @@ field%u=>gseq%psi
 CALL field%setup()
 active_tracer%neq=3
 active_tracer%B=>field
-maxsteps=maxsteps+8e4
-active_tracer%maxsteps=maxsteps
+active_tracer%maxsteps=maxsteps+INT(8e4,4)
 active_tracer%raxis=raxis
 active_tracer%zaxis=zaxis
 active_tracer%inv=.TRUE.
@@ -1290,18 +1290,20 @@ DEALLOCATE(rout,zout)
 !---------------------------------------------------------------------------
 ! Imposing periodicity: same as read_eq_hansen_inverse in GPEC, ifile requirement? 
 !---------------------------------------------------------------------------
-r(:,ntheta)=r(:,1)
-r(:,ntheta)=r(:,1)
+rout_(:,ntheta)=rout_(:,1)
+zout_(:,ntheta)=zout_(:,1)
 !---------------------------------------------------------------------------
 ! Write out inverse representation: transposed relative to gs_save_decon to match ifile
 !
 ! rout -> r(0:mpsi,0:mtheta)
 ! zout -> z(0:mpsi,0:mtheta)
+! rout_ -> r(mpsi:0,0:mtheta)
+! zout_ -> z(mpsi:0,0:mtheta)
 ! rout__ -> r(0:mtheta,mpsi:0)
 ! zout__ -> z(0:mtheta,mpsi:0)
 !---------------------------------------------------------------------------
-ALLOCATE(rout__(0:npsi,1:ntheta))
-ALLOCATE(zout__(0:npsi,1:ntheta))
+ALLOCATE(rout__(1:ntheta,0:npsi))
+ALLOCATE(zout__(1:ntheta,0:npsi))
 rout__=TRANSPOSE(rout_)
 zout__=TRANSPOSE(zout_)
 DEALLOCATE(rout_,zout_)
@@ -1332,7 +1334,7 @@ integer(4), intent(in) :: nr !< Number of radial points for flux/psi grid
 integer(4), intent(in) :: nz !< Number of vertical points for flux grid
 real(8), intent(in) :: rbounds(2) !< Radial extents for flux grid
 real(8), intent(in) :: zbounds(2) !< Radial extents for flux grid
-integer(4), intent(inout) :: meshsearch !< Option to refine mesh search for largest point(?)
+integer(4), intent(in) :: meshsearch !< Option to refine mesh search for largest point(?)
 integer(4), intent(in) :: maxsteps !< Option to increase max number of tracer steps 
 real(8), intent(in) :: ttol !< Option to increase tolerance of active tracer
 CHARACTER(LEN=36), intent(in) :: run_info !< Run information string [36]
@@ -1345,7 +1347,7 @@ real(8) :: pt(3),pt_last(3),f(3),psi_tmp(1),gop(3,3)
 type(oft_lag_brinterp) :: psi_int
 real(8), pointer :: ptout(:,:),rout(:),zout(:)
 real(8), parameter :: tol=1.d-10
-integer(4) :: i,j,k,cell,io_unit
+integer(4) :: i,j,k,cell,io_unit,meshsearch_
 type(gsinv_interp), target :: field
 TYPE(spline_type) :: rz
 !---
@@ -1381,11 +1383,12 @@ CALL psi_int%setup()
 !---Find Rmax along Zaxis
 rmax=raxis
 cell=0
-IF(meshsearch<100)THEN
-  meshsearch=100
+meshsearch_=meshsearch
+IF(meshsearch_<100)THEN
+  meshsearch_=100
 END IF
-DO j=1,meshsearch 
-  pt=[(gseq%rmax-raxis)*j/REAL(meshsearch,8)+raxis,zaxis,0.d0]
+DO j=1,meshsearch_ 
+  pt=[(gseq%rmax-raxis)*j/REAL(meshsearch_,8)+raxis,zaxis,0.d0]
   CALL bmesh_findcell(smesh,cell,pt,f)
   IF( (MAXVAL(f)>1.d0+tol) .OR. (MINVAL(f)<-tol) )EXIT
   CALL psi_int%interp(cell,f,gop,psi_tmp)
@@ -1411,8 +1414,7 @@ field%u=>gseq%psi
 CALL field%setup()
 active_tracer%neq=3
 active_tracer%B=>field
-maxsteps=maxsteps+8e4
-active_tracer%maxsteps=maxsteps
+active_tracer%maxsteps=maxsteps+INT(8e4,4)
 active_tracer%raxis=raxis
 active_tracer%zaxis=zaxis
 active_tracer%inv=.TRUE.
