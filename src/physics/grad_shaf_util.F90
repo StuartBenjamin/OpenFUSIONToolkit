@@ -862,6 +862,7 @@ real(8) :: gop(3,3),psi_surf(1),pt_last(3)
 real(8) :: raxis,zaxis,f(3),pt(3),rmax,x1,x1_true,x2,xr
 real(8), allocatable :: ptout(:,:)
 real(8), allocatable :: psi_grid(:)
+real(8), allocatable :: xdx(:,:)
 real(8), allocatable :: rout(:,:),zout(:,:),cout(:,:)
 real(8), parameter :: tol=1.d-10
 integer(4) :: j,k,cell,io_unit,ipsi
@@ -911,12 +912,12 @@ END IF
 ALLOCATE(psi_grid(0:npsi))
 IF(gpow>0)THEN
   xdx = powspace(0.d0, 1.d0, gpow, npsi+1, "lower")
-  psi_grid=xdx(1,:)
-ELSEIF(gpow==-1)!CASE("ldp")
+  psi_grid(:)=xdx(1,:)
+ELSEIF(gpow==-1)THEN!CASE("ldp")
   psi_grid=(/(ipsi,ipsi=0,npsi)/)/REAL(npsi,8)
   psi_grid=SIN(psi_grid*pi/2)**2
   psi_grid=1.d0-psi_grid
-ELSEIF(gpow==-2)!CASE("rho")
+ELSEIF(gpow==-2)THEN!CASE("rho")
   psi_grid=(/(ipsi**2,ipsi=0,npsi)/)/(npsi)**2
   psi_grid=1.d0-psi_grid
 ELSE!CASE default
@@ -1097,9 +1098,10 @@ real(8), allocatable :: ptout(:,:)
 real(8), allocatable :: rout(:,:),zout(:,:),cout(:,:)
 real(8), allocatable :: rout_(:,:),zout_(:,:)
 real(8), allocatable :: rout__(:,:),zout__(:,:)
+real(8), allocatable :: xdx(:,:)
 real(8), allocatable :: psi_grid(:)
 real(8), parameter :: tol=1.d-10
-integer(4) :: j,k,cell,io_unit
+integer(4) :: j,k,cell,io_unit,ipsi
 TYPE(spline_type) :: rz
 !---
 IF(PRESENT(error_str))error_str=""
@@ -1145,12 +1147,12 @@ END IF
 ALLOCATE(psi_grid(0:npsi))
 IF(gpow>0)THEN
   xdx = powspace(0.d0, 1.d0, gpow, npsi+1, "lower")
-  psi_grid=xdx(1,:)
-ELSEIF(gpow==-1)!CASE("ldp")
+  psi_grid(:)=xdx(1,:)
+ELSEIF(gpow==-1)THEN!CASE("ldp")
   psi_grid=(/(ipsi,ipsi=0,npsi)/)/REAL(npsi,8)
   psi_grid=SIN(psi_grid*pi/2)**2
   psi_grid=1.d0-psi_grid
-ELSEIF(gpow==-2)!CASE("rho")
+ELSEIF(gpow==-2)THEN!CASE("rho")
   psi_grid=(/(ipsi**2,ipsi=0,npsi)/)/(npsi)**2
   psi_grid=1.d0-psi_grid
 ELSE!CASE default
@@ -1834,7 +1836,7 @@ select case (pow)
    case (9)
         powspace(1,:) = -x + 3*x**3 - (36*x**5)/5 + 12*x**7 - 14*x**9 + (126*x**11)/11 - (84*x**13)/13 + (12*x**15)/5 - (9*x**17)/17 + x**19/19
    case default
-      call program_stop("Grid power not in analytic database")
+    stop "Grid power not in analytic database"
 end select
 
 !stretch to the desired range
