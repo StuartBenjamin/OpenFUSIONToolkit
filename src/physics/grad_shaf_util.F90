@@ -1364,14 +1364,15 @@ REAL(8), ALLOCATABLE, DIMENSION(:) :: rlim,zlim
 CHARACTER(LEN=48) :: eqdsk_case
 INTEGER(4) :: idum
 REAL(8) :: rdim,zdim,rleft,zmid,bcentr,itor,xdum
-REAL(8), ALLOCATABLE, DIMENSION(:) :: fpol,pres,ffprim,pprime,qpsi
+REAL(8), ALLOCATABLE, DIMENSION(:) :: fpol,pres,ffprim,pprime,qpsi,truepsi
 REAL(8), ALLOCATABLE, DIMENSION(:,:) :: psirz
+LOGICAL :: use_true_psi=.FALSE.
 !---
 IF(PRESENT(error_str))error_str=""
 WRITE(*,'(2A)')oft_indent,'Saving EQDSK file'
 CALL oft_increase_indent
 !---
-ALLOCATE(fpol(nr),pres(nr),ffprim(nr),pprime(nr),qpsi(nr))
+ALLOCATE(fpol(nr),pres(nr),ffprim(nr),pprime(nr),qpsi(nr),truepsi(nr))
 ALLOCATE(psirz(nr,nz))
 !---
 raxis=gseq%o_point(1)
@@ -1436,6 +1437,7 @@ do j=1,nr
   !---------------------------------------------------------------------------
   psi_surf=(x2-x1)*((j-1)/REAL(nr-1,8))! + x1!**2  !from 0 to 1 times (x2-x1)
   psi_surf=x2 - psi_surf  !psi_surf goes from from x2 (~1) to x1, but not quite to x1_true (psi on separatrix)
+  truepsi(j)=psi_surf
   IF(gseq%diverted.AND.(psi_surf-x1)/(x2-x1)<0.02d0)THEN ! Use higher tracing tolerance near divertor
     IF(ttol.gt.1.d-10)THEN
       active_tracer%tol=1.d-10
@@ -1579,10 +1581,14 @@ WRITE (io_unit,2020) itor,x2,xdum,raxis,xdum
 WRITE (io_unit,2020) zaxis,xdum,x1_true,xdum,xdum
 WRITE (io_unit,2020) (fpol(i),i=1,nr)
 WRITE (io_unit,2020) (pres(i),i=1,nr)
-WRITE (io_unit,2020) (ffprim(i),i=1,nr)
-WRITE (io_unit,2020) (pprime(i),i=1,nr)
+WRITE (io_unit,2020) (ffprim(i),i=1,nr) !Read by DCON in sq_in%fs(:,3), then overwritten
+IF(use_true_psi)THEN !Optional case, saves psi instead of pprime so DCON can read psi directly
+  WRITE (io_unit,2020) (truepsi(i),i=1,nr)
+ELSE !Default case, prints pprime which DCON reads but doesn't record
+  WRITE (io_unit,2020) (pprime(i),i=1,nr) !Read by DCON in sq_in%fs(:,3), then overwritten
+ENDIF
 WRITE (io_unit,2020) ((psirz(i,j),i=1,nr),j=1,nz)
-WRITE (io_unit,2020) (qpsi(i),i=1,nr)
+WRITE (io_unit,2020) (qpsi(i),i=1,nr)  !Read by DCON in sq_in%fs(:,3)
 WRITE (io_unit,2022) nr,nlim
 WRITE (io_unit,2020) (rout(i),zout(i),i=1,nr)
 WRITE (io_unit,2020) (rlim(i),zlim(i),i=1,nlim)
