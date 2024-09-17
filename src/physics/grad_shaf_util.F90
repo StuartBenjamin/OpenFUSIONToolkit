@@ -1366,7 +1366,7 @@ INTEGER(4) :: idum
 REAL(8) :: rdim,zdim,rleft,zmid,bcentr,itor,xdum
 REAL(8), ALLOCATABLE, DIMENSION(:) :: fpol,pres,ffprim,pprime,qpsi,truepsi
 REAL(8), ALLOCATABLE, DIMENSION(:,:) :: psirz
-LOGICAL :: use_true_psi=.FALSE.
+LOGICAL :: use_true_psi=.TRUE.
 !---
 IF(PRESENT(error_str))error_str=""
 WRITE(*,'(2A)')oft_indent,'Saving EQDSK file'

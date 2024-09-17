@@ -9,9 +9,9 @@
 # Python interface for TokaMaker Grad-Shafranov functionality
 import ctypes
 # import json
-# import math
+import math
 import numpy
-from scipy.interpolate import CubicSpline, make_interp_spline
+from scipy.interpolate import CubicSpline, InterpolatedUnivariateSpline
 from ..util import *
 from ._interface import *
 
@@ -1282,7 +1282,7 @@ class TokaMaker():
         if cstring.value != b'':
             raise Exception(cstring.value)
 
-    def save_GPEC_input(self,filename,npsi=256,psi=None,ntheta=512,lcfs_pad=0.01,meshsearch=0,maxsteps=0,ttol=1e-10,gpow=-1):
+    def save_GPEC_input(self,filename,npsi=256,psi=None,ntheta=512,lcfs_pad=0.01,meshsearch=0,maxsteps=0,ttol=1e-10,gpow=-2):
         '''! Save current equilibrium to GPEC format used in read_eq_hansen_inverse
 
         @param filename Filename to save DCON input file to
@@ -1296,21 +1296,23 @@ class TokaMaker():
         @param gpow Built in fortran options for psi grid sampling (see gs_save_decon function for details)
         '''
         if psi is not None:
-            if gpow != -1:
+            npsi=len(psi)-1
+            if gpow != -2:
                 print('Warning: Input psi-grid will override psi grid specified by gpow')
             gpow=0
-            if len(psi) != (npsi+1):
-                Exception('psi input must be of length npsi+1')
         else:
             #initialising psi grid of zeros (gpow will take precedence)
             psi = numpy.linspace(0.0,0.0,npsi+1,dtype=numpy.float64)
+            if gpow == 0: 
+                gpow=-2 
+
         cfilename = c_char_p(filename.encode())
         cstring = c_char_p(b""*200)
-        tokamaker_save_decon(cfilename,c_int(npsi),c_int(ntheta),c_double(lcfs_pad),cstring,c_int(meshsearch),c_int(maxsteps),c_double(ttol),c_int(gpow))
+        tokamaker_save_decon(cfilename,c_int(npsi),psi,c_int(ntheta),c_double(lcfs_pad),cstring,c_int(meshsearch),c_int(maxsteps),c_double(ttol),c_int(gpow))
         if cstring.value != b'':
             raise Exception(cstring.value)
 
-    def save_ifile(self,filename,npsi=256,psi=None,ntheta=512,lcfs_pad=0.01,meshsearch=0,maxsteps=0,ttol=1e-10,gpow=-1):
+    def save_ifile(self,filename,npsi=256,psi=None,ntheta=512,lcfs_pad=0.01,meshsearch=0,maxsteps=0,ttol=1e-10,gpow=-2):
         '''! Save current equilibrium to L. Don Pearlstein's ifile format
 
         @param filename Filename to save ifile to
@@ -1324,17 +1326,19 @@ class TokaMaker():
         @param gpow Built in fortran options for psi grid sampling (see gs_save_ifile function for details)
         '''
         if psi is not None:
-            if gpow != -1:
+            npsi=len(psi)-1
+            if gpow != -2:
                 print('Warning: Input psi-grid will override psi grid specified by gpow')
             gpow=0
-            if len(psi) != (npsi+1):
-                Exception('psi input must be of length npsi+1')
         else:
             #initialising psi grid of zeros (gpow will take precedence)
             psi = numpy.linspace(0.0,0.0,npsi+1,dtype=numpy.float64)
+            if gpow == 0: 
+                gpow=-2
+
         cfilename = c_char_p(filename.encode())
         cstring = c_char_p(b""*200)
-        tokamaker_save_ifile(cfilename,c_int(npsi),c_int(ntheta),c_double(lcfs_pad),cstring,c_int(meshsearch),c_int(maxsteps),c_double(ttol),c_int(gpow))
+        tokamaker_save_ifile(cfilename,c_int(npsi),psi,c_int(ntheta),c_double(lcfs_pad),cstring,c_int(meshsearch),c_int(maxsteps),c_double(ttol),c_int(gpow))
         if cstring.value != b'':
             raise Exception(cstring.value)
 
@@ -1389,8 +1393,7 @@ class TokaMaker():
         tokamaker_step_td(ctypes.byref(time),ctypes.byref(dt),ctypes.byref(nl_its),ctypes.byref(lin_its),ctypes.byref(nretry))
         return time.value, dt.value, nl_its.value, lin_its.value, nretry.value
 
-
-def solve_with_bootstrap(self,ne,Te,ni,Ti,inductive_jtor,Zeff,smooth_inputs=False,jBS_scale=1.0,Zis=[1.],max_iterations=6,rescale_ind_Jtor_by_ftr=False,initialize_eq=True,fig=None,ax=None,plot_iteration=False):
+def solve_with_bootstrap(self,ne,Te,ni,Ti,inductive_jtor,Zeff,smooth_inputs=True,jBS_scale=1.0,Zis=[1.],max_iterations=6,rescale_ind_Jtor_by_ftr=True,initialize_eq=True,fig=None,ax=None,plot_iteration=False):
     '''! Self-consistently compute bootstrap contribution from H-mode profiles,
     and iterate solution until all functions of Psi converge. 
 
@@ -1422,17 +1425,6 @@ def solve_with_bootstrap(self,ne,Te,ni,Ti,inductive_jtor,Zeff,smooth_inputs=Fals
         from omfit_classes.utils_fusion import sauter_bootstrap
     except:
         raise ImportError('omfit_classes.utils_fusion not installed')
-    
-    def ffprime_from_jtor_pprime(jtor, pprime, R_avg, one_over_R_avg):
-        r'''! Convert from J_toroidal to FF' using Grad-Shafranov equation
-
-        @param jtor Toroidal current profile
-        @param R_avg Flux averaged R, calculated by TokaMaker
-        @param one_over_R_avg Flux averaged 1/R, calculated by TokaMaker
-        @param pprime dP/dPsi profile
-        '''
-        ffprime = (jtor -  R_avg * (-pprime)) * (mu0 / one_over_R_avg)
-        return ffprime
 
     kBoltz = eC
     pressure = (kBoltz * ne * Te) + (kBoltz * ni * Ti) # 1.602e-19 * [m^-3] * [eV] = [Pa]
@@ -1444,7 +1436,7 @@ def solve_with_bootstrap(self,ne,Te,ni,Ti,inductive_jtor,Zeff,smooth_inputs=Fals
     psi_norm = numpy.linspace(0.,1.,len(inductive_jtor))
     n_psi = len(inductive_jtor)
 
-    def profile_iteration(self,pressure,ne,ni,Te,Ti,psi_norm,n_psi,Zeff,inductive_jtor,jBS_scale,Zis,rescale_ind_Jtor_by_ftr=False,include_jBS=True,plot_iteration=False,ax=None,fig=None,iteration=-1):
+    def profile_iteration(self,pressure,ne,ni,Te,Ti,psi_norm,n_psi,Zeff,inductive_jtor,jBS_scale,Zis,init_Lmode=False,rescale_ind_Jtor_by_ftr=True,smooth_inputs=False,include_jBS=True,plot_iteration=False,ax=None,fig=None,iteration=-1,max_iterations=0):
 
         pprime=get_pprime(psi_norm,pressure,(1.0/(self.psi_bounds[1]-self.psi_bounds[0])))
         #pprime = numpy.gradient(pressure) / (numpy.gradient(psi_norm) * (self.psi_bounds[1]-self.psi_bounds[0]))
@@ -1461,9 +1453,11 @@ def solve_with_bootstrap(self,ne,Te,ni,Ti,inductive_jtor,Zeff,smooth_inputs=Fals
         #option to rescale input inductive current profile by trapped fraction
         # use if input current profile was taken from spitzer resistivity (see Sauter 1999 fig 2)
         if rescale_ind_Jtor_by_ftr: 
+            if plot_iteration:
+                ax[0].plot(psi_norm,inductive_jtor,label=r"$J_{ind, Spitzer}$",color='tab:orange',alpha=(iteration+2)/(iteration+2))
             ind_Ip_target=cross_section_surf_int(inductive_jtor,r_avgs[2]) #getting total inductive current
             inductive_jtor=inductive_jtor*fc    #reshaping inductive current profile by passing fraction
-            inductive_jtor=rescale_Jtor(inductive_jtor,ind_Ip_target,r_avgs[2])
+            inductive_jtor,rscaling_fac=rescale_Jtor(inductive_jtor,ind_Ip_target,r_avgs[2])
         
         if include_jBS:
             ### Calculate flux derivatives for Sauter
@@ -1473,7 +1467,7 @@ def solve_with_bootstrap(self,ne,Te,ni,Ti,inductive_jtor,Zeff,smooth_inputs=Fals
             dT_i_dpsi = numpy.gradient(Ti) / (numpy.gradient(psi_norm) * (self.psi_bounds[1]-self.psi_bounds[0]))
 
             ### Solve for bootstrap current profile. See https://omfit.io/_modules/omfit_classes/utils_fusion.html for more detailed documentation 
-            j_BS_neo = sauter_bootstrap(
+            flux_surf_avg_of_B_timesj_BS = sauter_bootstrap(
                                     psi_N=psi_norm,
                                     Te=Te,
                                     Ti=Ti,
@@ -1505,26 +1499,29 @@ def solve_with_bootstrap(self,ne,Te,ni,Ti,inductive_jtor,Zeff,smooth_inputs=Fals
                                     dnis_dpsi=[dn_i_dpsi,],
                                     )[0]
             inductive_jtor[-1] = 0. ### FORCING inductive_jtor TO BE ZERO AT THE EDGE
-            j_BS = j_BS_neo*(R_avg / f) ### Convert into [A/m^2]
+            j_BS = flux_surf_avg_of_B_timesj_BS*(R_avg / f) ### Convert into [A/m^2] by dividing by <Bt>... should be using <B> instead!!
             j_BS *= jBS_scale ### Scale j_BS by user specified scalar
             j_BS[-1] = 0. ### FORCING j_BS TO BE ZERO AT THE EDGE
+
+            #   We rescale inductive_jtor to match self._Ip_target, since we can't rescale bootstrap current (its given by pressure profile etc.)
+            #   If you instead want to respect the inductive_jtor profile, don't set a self._Ip_target.
+            if self._Ip_target.value != -1.E99 and not init_Lmode: #    We don't rescale inductive_jtor unless we are getting the proper, full bootstrap current from the pedestal... no init_Lmode here
+                total_BS_current=cross_section_surf_int(j_BS,r_avgs[2])
+                inductive_jtor,rescling_fac=rescale_Jtor(inductive_jtor,(self._Ip_target.value-total_BS_current),r_avgs[2],verbose=True)
             jtor_total = inductive_jtor + j_BS
 
-            if self._Ip_target.value != -1.E99:
-                jtor_total,rescling_fac=rescale_Jtor(jtor_total,self._Ip_target.value,r_avgs[2],verbose=plot_iteration)
-                j_BS=j_BS*rescling_fac
-
             if plot_iteration:
-                if iteration+2==7:
-                    ax[0].plot(psi_norm,j_BS*rescling_fac,label=r"$J_{bs}$",color='r',alpha=(iteration+2)/7)
-                    ax[0].plot(psi_norm,jtor_total,label=r"$J_{tot}$",color='k',linestyle='dotted',alpha=(iteration+2)/7)
-                    ax[0].plot(psi_norm,inductive_jtor*rescling_fac,label=r"$J_{ind}$",color='b',alpha=(iteration+2)/7)
+                if iteration==max_iterations:
+                    ax[0].plot(psi_norm,inductive_jtor,label=r"$J_{ind, neoclassical}$",color='b',alpha=(iteration+2)/(max_iterations+2))
+                    ax[0].plot(psi_norm,j_BS,label=r"$J_{bootstrap}$",color='r',alpha=(iteration+2)/(max_iterations+2))
+                    ax[0].plot(psi_norm,jtor_total,label=r"$J_{total}$",color='k',linestyle='dotted',alpha=(iteration+2)/(max_iterations+2))
                 else:
-                    ax[0].plot(psi_norm,j_BS*rescling_fac,color='r',alpha=(iteration+2)/7)
-                    ax[0].plot(psi_norm,jtor_total,color='k',linestyle='dotted',alpha=(iteration+2)/7)
-                    ax[0].plot(psi_norm,inductive_jtor*rescling_fac,color='b',alpha=(iteration+2)/7)
+                    ax[0].plot(psi_norm,j_BS,color='r',alpha=(iteration+2)/(max_iterations+2))
+                    ax[0].plot(psi_norm,jtor_total,color='k',linestyle='dotted',alpha=(iteration+2)/(max_iterations+2))
+                    ax[0].plot(psi_norm,inductive_jtor,color='b',alpha=(iteration+2)/(max_iterations+2))
         else:
             j_BS = None
+            flux_surf_avg_of_B_timesj_BS = None
             inductive_jtor[-1] = 0. ### FORCING inductive_jtor TO BE ZERO AT THE EDGE
             jtor_total = inductive_jtor
             if plot_iteration:
@@ -1532,12 +1529,12 @@ def solve_with_bootstrap(self,ne,Te,ni,Ti,inductive_jtor,Zeff,smooth_inputs=Fals
         
         ffprime = ffprime_from_jtor_pprime(jtor_total, pprime, R_avg, one_over_R_avg)
         if plot_iteration: 
-            if iteration+2==7:
-                ax[1].plot(psi_norm,ffprime,label=r"$FF'$ input",color='r',alpha=(iteration+2)/7)
-                ax[1].plot(psi_norm,f*fp,label=r"$FF'$ output",color='k',linestyle='dotted',alpha=(iteration+2)/7)
+            if iteration==max_iterations:
+                ax[1].plot(psi_norm,ffprime,label=r"$FF'$ input",color='r',alpha=(iteration+2)/(max_iterations+2))
+                ax[1].plot(psi_norm,f*fp,label=r"$FF'$ output",color='k',linestyle='dotted',alpha=(iteration+2)/(max_iterations+2))
             else:
-                ax[1].plot(psi_norm,ffprime,color='r',alpha=(iteration+2)/7)
-                ax[1].plot(psi_norm,f*fp,color='k',linestyle='dotted',alpha=(iteration+2)/7)
+                ax[1].plot(psi_norm,ffprime,color='r',alpha=(iteration+2)/(max_iterations+2))
+                ax[1].plot(psi_norm,f*fp,color='k',linestyle='dotted',alpha=(iteration+2)/(max_iterations+2))
             ax[0].legend(loc='best')
             ax[0].set_ylabel(r"$J_{tor}$")
             ax[1].legend(loc='best')
@@ -1562,9 +1559,9 @@ def solve_with_bootstrap(self,ne,Te,ni,Ti,inductive_jtor,Zeff,smooth_inputs=Fals
         }
 
         if plot_iteration:
-            return pp_prof, ffp_prof, j_BS, jtor_total, fig, ax
+            return pp_prof, ffp_prof, j_BS, inductive_jtor, jtor_total, flux_surf_avg_of_B_timesj_BS, fig, ax
         else:
-            return pp_prof, ffp_prof, j_BS, jtor_total
+            return pp_prof, ffp_prof, j_BS, inductive_jtor, jtor_total, flux_surf_avg_of_B_timesj_BS
 
     if initialize_eq:
         x_trimmed = psi_norm.tolist().copy()
@@ -1599,9 +1596,9 @@ def solve_with_bootstrap(self,ne,Te,ni,Ti,inductive_jtor,Zeff,smooth_inputs=Fals
         print('>>> Initializing equilibrium with pedestal removed:')
 
         if plot_iteration:
-            init_pp_prof, init_ffp_prof, j_BS, jtor_total, fig, ax = profile_iteration(self,init_pressure,init_ne,init_ni,init_Te,init_Ti,psi_norm,n_psi,Zeff,inductive_jtor,jBS_scale,Zis,smooth_inputs=smooth_inputs,rescale_ind_Jtor_by_ftr=rescale_ind_Jtor_by_ftr,include_jBS=False,iteration=-1,plot_iteration=plot_iteration,fig=fig,ax=ax)
+            init_pp_prof, init_ffp_prof, j_BS, inductive_jtor, jtor_total, flux_surf_avg_of_B_timesj_BS, fig, ax = profile_iteration(self,init_pressure,init_ne,init_ni,init_Te,init_Ti,psi_norm,n_psi,Zeff,inductive_jtor,jBS_scale,Zis,smooth_inputs=smooth_inputs,rescale_ind_Jtor_by_ftr=rescale_ind_Jtor_by_ftr,include_jBS=False,init_Lmode=True,iteration=-1,plot_iteration=plot_iteration,fig=fig,ax=ax,max_iterations=max_iterations)
         else:
-            init_pp_prof, init_ffp_prof, j_BS, jtor_total = profile_iteration(self,init_pressure,init_ne,init_ni,init_Te,init_Ti,psi_norm,n_psi,Zeff,inductive_jtor,jBS_scale,Zis,smooth_inputs=smooth_inputs,rescale_ind_Jtor_by_ftr=rescale_ind_Jtor_by_ftr,include_jBS=False)
+            init_pp_prof, init_ffp_prof, j_BS, inductive_jtor, jtor_total, flux_surf_avg_of_B_timesj_BS = profile_iteration(self,init_pressure,init_ne,init_ni,init_Te,init_Ti,psi_norm,n_psi,Zeff,inductive_jtor,jBS_scale,Zis,smooth_inputs=smooth_inputs,rescale_ind_Jtor_by_ftr=rescale_ind_Jtor_by_ftr,include_jBS=False,init_Lmode=True,)
 
         init_pp_prof['y'][-1] = 0. # Enforce 0.0 at edge
         init_ffp_prof['y'][-1] = 0. # Enforce 0.0 at edge
@@ -1613,21 +1610,24 @@ def solve_with_bootstrap(self,ne,Te,ni,Ti,inductive_jtor,Zeff,smooth_inputs=Fals
 
         flag = self.solve()
 
+    if initialize_eq: #Don't rescale by trapped fraction than once... you'll keep peaking the current indefinitely
+        rescale_ind_Jtor_by_ftr=False
+
     if initialize_eq and flag<0:
         print('Warning: H-mode equilibrium solve errored at initialisation')
         print(error_reason(flag))
-        return flag, j_BS, jtor_total
+        return self, flag, None, None, None, None, None, None, None
     ### Specify original H-mode profiles, iterate on bootstrap contribution until reasonably converged
     n = 0
     flag = -1
     print('>>> Iterating on H-mode equilibrium solution:')
-    while n < max_iterations:
+    while n <= max_iterations:
         print('> Iteration '+str(n)+':')
 
         if not plot_iteration: 
-            pp_prof, ffp_prof, j_BS, jtor_total = profile_iteration(self,pressure,ne,ni,Te,Ti,psi_norm,n_psi,Zeff,inductive_jtor,jBS_scale,Zis,rescale_ind_Jtor_by_ftr=rescale_ind_Jtor_by_ftr,smooth_inputs=smooth_inputs)
+            pp_prof, ffp_prof, j_BS, inductive_jtor, jtor_total, flux_surf_avg_of_B_timesj_BS = profile_iteration(self,pressure,ne,ni,Te,Ti,psi_norm,n_psi,Zeff,inductive_jtor,jBS_scale,Zis,rescale_ind_Jtor_by_ftr=rescale_ind_Jtor_by_ftr,smooth_inputs=smooth_inputs)
         else: 
-            pp_prof, ffp_prof, j_BS, jtor_total, fig, ax = profile_iteration(self,pressure,ne,ni,Te,Ti,psi_norm,n_psi,Zeff,inductive_jtor,jBS_scale,Zis,rescale_ind_Jtor_by_ftr=rescale_ind_Jtor_by_ftr,smooth_inputs=smooth_inputs,iteration=n,plot_iteration=plot_iteration,fig=fig,ax=ax)
+            pp_prof, ffp_prof, j_BS, inductive_jtor, jtor_total, flux_surf_avg_of_B_timesj_BS, fig, ax = profile_iteration(self,pressure,ne,ni,Te,Ti,psi_norm,n_psi,Zeff,inductive_jtor,jBS_scale,Zis,rescale_ind_Jtor_by_ftr=rescale_ind_Jtor_by_ftr,smooth_inputs=smooth_inputs,iteration=n,plot_iteration=plot_iteration,fig=fig,ax=ax,max_iterations=max_iterations)
 
         pp_prof['y'][-1] = 0. # Enforce 0.0 at edge
         ffp_prof['y'][-1] = 0. # Enforce 0.0 at edge
@@ -1639,17 +1639,452 @@ def solve_with_bootstrap(self,ne,Te,ni,Ti,inductive_jtor,Zeff,smooth_inputs=Fals
 
         flag = self.solve()
 
+        rescale_ind_Jtor_by_ftr=False #Don't rescale by trapped fraction more than once... you'll keep peaking the current indefinitely
         n += 1
         if flag<0:
             print('Warning: H-mode equilibrium solve did not converge, solve failed:')
             print(error_reason(flag))
-            return flag, j_BS, jtor_total
-        if (n > 5) and (flag >= 0):
+            return self, flag, j_BS, jtor_total, flux_surf_avg_of_B_timesj_BS, inductive_jtor, pp_prof, ffp_prof, pressure[0]
+        if (n > max_iterations) and (flag >= 0):
             break
-        elif n >= max_iterations:
+        elif n > max_iterations+1:
             raise TypeError('H-mode equilibrium solve did not converge')
         self.print_info()
-    return flag, j_BS, jtor_total
+    return self, flag, j_BS, jtor_total, flux_surf_avg_of_B_timesj_BS, inductive_jtor, pp_prof, ffp_prof, pressure[0]
+
+
+def basic_dynamo_w_bootstrap(self,ne,Te,ni,Ti,inductive_jtor,Zeff,smooth_inputs=True,jBS_scale=1.0,Zis=[1.],max_iterations=6,rescale_ind_Jtor_by_ftr=False,initialize_eq=True,fig=None,ax=None,plot_iteration=False):
+    '''! 
+    Takes equilibrium, iterates current profile shape to achieve on axis above q>1.
+    Does this by subtracting current density from inside the q=1 rational surface and depositing it 
+    both immediately outside the rational surface (like a heuristic dynamo effect, see 
+    https://indico.cern.ch/event/934747/contributions/4514274/attachments/2303331/3962875/Krebs_EFTC_slides.pdf)
+    and also in the bulk plasma. Exits once q0>1 is achieved. Function will keep an imposed total current goal 
+    if one was previously specified in the targets. Also the neoclassical bootstrap current is included.
+    Warning: this is not a simulation of sawtooth dynamics.
+    
+    @note if using nis and Zis, dnis_dpsi must be specified in sauter_bootstrap() 
+    as a list of impurity gradients over Psi. See https://omfit.io/_modules/omfit_classes/utils_fusion.html for more detailed documentation 
+
+    @param ne Electron density profile, sampled over psi_norm
+    @param Te Electron temperature profile [eV], sampled over psi_norm
+    @param ni Ion density profile, sampled over psi_norm
+    @param Ti Ion temperature profile [eV], sampled over psi_norm
+    @param inductive_jtor Inductive toroidal current, sampled over psi_norm
+    @param Zeff Effective Z profile, sampled over psi_norm
+    @param scale_jBS Scalar which can scale bootstrap current profile
+    @param nis List of impurity density profiles; NOT USED
+    @param Zis List of impurity profile atomic numbers; NOT USED. 
+    @param max_iterations Maximum number of H-mode mygs.solve() iterations
+    @param initialize_eq Initialize equilibrium solve with flattened pedestal. 
+    @param return_jBS Return bootstrap profile alongside err_flag
+    '''
+    try:
+        from omfit_classes.utils_fusion import sauter_bootstrap
+    except:
+        raise ImportError('omfit_classes.utils_fusion not installed')
+    
+    #DYNAMO
+    q0_vals = []
+    q1_psi_surf=[]
+    def gaussian(x, mu, sig):
+        return (
+            1.0 / (numpy.sqrt(2.0 * numpy.pi) * sig) * numpy.exp(-numpy.power((x - mu) / sig, 2.0) / 2)
+    )#DYNAMO
+
+    kBoltz = eC
+    pressure = (kBoltz * ne * Te) + (kBoltz * ni * Ti) # 1.602e-19 * [m^-3] * [eV] = [Pa]
+
+    ### Set new pax target
+    self.set_targets(pax=pressure[0],retain_previous=True)
+
+    ### Reconstruct psi_norm and n_psi from input inductive_jtor
+    psi_norm = numpy.linspace(0.,1.,len(inductive_jtor))
+    n_psi = len(inductive_jtor)
+
+    def profile_iteration(self,pressure,ne,ni,Te,Ti,psi_norm,n_psi,Zeff,inductive_jtor,jBS_scale,Zis,q_1_psi_location=0.2,init_Lmode=False,rescale_ind_Jtor_by_ftr=False,smooth_inputs=False,include_jBS=True,plot_iteration=False,ax=None,fig=None,iteration=-1,max_iterations=0):
+        flag_end=False
+        pprime=get_pprime(psi_norm,pressure,(1.0/(self.psi_bounds[1]-self.psi_bounds[0])))
+        #pprime = numpy.gradient(pressure) / (numpy.gradient(psi_norm) * (self.psi_bounds[1]-self.psi_bounds[0]))
+
+        ### Get final remaining quantities for Sauter from TokaMaker
+        psi,f,fp,_,_ = self.get_profiles(npsi=n_psi)
+        _,fc,r_avgs,_ = self.sauter_fc(npsi=n_psi)
+        ft = 1 - fc # Trapped particle fraction on each flux surface
+        eps = r_avgs[2] / r_avgs[0] # Inverse aspect ratio
+        _,qvals,ravgs,_,_,_ = self.get_q(npsi=n_psi)
+        R_avg = ravgs[0]
+        one_over_R_avg = ravgs[1]
+
+        #option to rescale input inductive current profile by trapped fraction
+        # use if input current profile was taken from spitzer resistivity (see Sauter 1999 fig 2)
+        if rescale_ind_Jtor_by_ftr: 
+            if plot_iteration:
+                ax[0].plot(psi_norm,inductive_jtor,label=r"$J_{ind, Spitzer}$",color='b',alpha=0.5)
+            ind_Ip_target=cross_section_surf_int(inductive_jtor,r_avgs[2]) #getting total inductive current
+            inductive_jtor=inductive_jtor*fc    #reshaping inductive current profile by passing fraction
+            inductive_jtor,rscale_fac=rescale_Jtor(inductive_jtor,ind_Ip_target,r_avgs[2])
+        
+        if include_jBS:
+            ### Calculate flux derivatives for Sauter
+            dn_e_dpsi = numpy.gradient(ne) / (numpy.gradient(psi_norm) * (self.psi_bounds[1]-self.psi_bounds[0]))
+            dT_e_dpsi = numpy.gradient(Te) / (numpy.gradient(psi_norm) * (self.psi_bounds[1]-self.psi_bounds[0]))
+            dn_i_dpsi = numpy.gradient(ni) / (numpy.gradient(psi_norm) * (self.psi_bounds[1]-self.psi_bounds[0]))
+            dT_i_dpsi = numpy.gradient(Ti) / (numpy.gradient(psi_norm) * (self.psi_bounds[1]-self.psi_bounds[0]))
+
+            ### Solve for bootstrap current profile. See https://omfit.io/_modules/omfit_classes/utils_fusion.html for more detailed documentation 
+            flux_surf_avg_of_B_timesj_BS = sauter_bootstrap(
+                                    psi_N=psi_norm,
+                                    Te=Te,
+                                    Ti=Ti,
+                                    ne=ne,
+                                    p=pressure,
+                                    nis=[ni,],
+                                    Zis=Zis,
+                                    Zeff=Zeff,
+                                    gEQDSKs=[None],
+                                    R0=0., # not used
+                                    device=None,
+                                    psi_N_efit=None,
+                                    psiraw=psi*(self.psi_bounds[1]-self.psi_bounds[0]) + self.psi_bounds[0],
+                                    R=R_avg,
+                                    eps=eps, 
+                                    q=qvals,
+                                    fT=ft,
+                                    I_psi=f,
+                                    nt=1,
+                                    version='neo_2021',
+                                    debug_plots=False,
+                                    return_units=True,
+                                    return_package=False,
+                                    charge_number_to_use_in_ion_collisionality='Koh',
+                                    charge_number_to_use_in_ion_lnLambda='Zavg',
+                                    dT_e_dpsi=dT_e_dpsi,
+                                    dT_i_dpsi=dT_i_dpsi,
+                                    dn_e_dpsi=dn_e_dpsi,
+                                    dnis_dpsi=[dn_i_dpsi,],
+                                    )[0]
+            inductive_jtor[-1] = 0. ### FORCING inductive_jtor TO BE ZERO AT THE EDGE
+            j_BS = flux_surf_avg_of_B_timesj_BS*(R_avg / f) ### Convert into [A/m^2] by dividing by <Bt>... should be using <B> instead!!
+            j_BS *= jBS_scale ### Scale j_BS by user specified scalar
+            j_BS[-1] = 0. ### FORCING j_BS TO BE ZERO AT THE EDGE
+
+            #   We rescale inductive_jtor to match self._Ip_target, since we can't rescale bootstrap current (its given by pressure profile etc.)
+            #   If you instead want to respect the inductive_jtor profile, don't set a self._Ip_target.
+            if self._Ip_target.value != -1.E99 and not init_Lmode: #    We don't rescale inductive_jtor unless we are getting the proper, full bootstrap current from the pedestal... no init_Lmode here
+                total_BS_current=cross_section_surf_int(j_BS,r_avgs[2])
+                inductive_jtor,rescling_fac=rescale_Jtor(inductive_jtor,(self._Ip_target.value-total_BS_current),r_avgs[2],verbose=plot_iteration)
+                total_ind_current=self._Ip_target.value-total_BS_current #DYNAMO
+
+            #DYNAMO
+            q_offset=qvals[0]-1.02
+            if q_offset<0.0 or q_offset>0.05: #0.05 #1# broke here 
+                qoff_min=0.03  #0.03 #1# broke here
+                if q_offset>0:
+                    q_offset=q_offset*0.8
+                #SETUP:
+                jtor_total_temp = inductive_jtor + j_BS
+                rho = numpy.sqrt(psi)
+
+                q_1_psi_location_record=q_1_psi_location
+                found,q_1_psi_location,i_near = solve_for_psi_crossing(psi,qvals,1.02)
+
+                if found:
+                    print("q0 = ",qvals[0],":::: q = 1 psi location = ",q_1_psi_location,"::::::::::::::::::::::::::::::::::::")
+                elif not found and q_offset<0:
+                    raise "Error, q<1 surface was unable to be located"
+                elif not found and q_offset>0:
+                    q_1_psi_location=q_1_psi_location_record
+                    print("q0 = ",qvals[0]," > 1.1. Reducing q0 with last psi location = ",q_1_psi_location,"::::::::::::::::::::::::::::::::::::")
+
+                outside_rho_step=0.08+0.4*min(q_1_psi_location,0.2)
+
+                total_norm_current=cross_section_surf_int(jtor_total_temp,rho)
+                avg_norm_current_density_at_that_rho=total_norm_current/(numpy.pi*(min(numpy.sqrt(q_1_psi_location)+0.15,0.8))**2)
+                #print("Comparison of two values:",jtor_total_temp[i_near],avg_norm_current_density_at_that_rho) #How to make sure we adding a reasonable amount:
+                
+                #ARB SECTION:
+                add_factorV=0.5*numpy.array([0.2,0.6,1.0])
+                #add_factorV=0.5*np.array(add_factorV)
+                    #[0.2,0.8,1.0] worked ish
+                    #[0.3,0.7,1.0] worked ish too much add_factor (sensitive to 0.2)
+                    #[0.2,0.6,1.0] working well (just reducing the peak)
+                width=1.0*min(q_1_psi_location,0.2)+0.1
+                width2=0.3
+                swidth=min(q_1_psi_location,0.15)+0.1
+                add_factor=add_factorV[0]*(-q_offset+qoff_min)*avg_norm_current_density_at_that_rho  
+                add_factor2=add_factorV[1]*((5+iteration)/30)*(-q_offset+qoff_min)*avg_norm_current_density_at_that_rho 
+                subtract_factor=add_factorV[2]*(q_1_psi_location)*(-q_offset+qoff_min)*avg_norm_current_density_at_that_rho
+                    #0.15
+                    
+
+                for i in range(len(inductive_jtor)):
+                    inductive_jtor[i]-=subtract_factor*gaussian(rho[i],0.0,swidth)
+                    inductive_jtor[i]+=add_factor*gaussian(rho[i],numpy.sqrt(q_1_psi_location)+outside_rho_step,width)
+                    inductive_jtor[i]+=add_factor2*gaussian(rho[i],0.5,width2) 
+                    if found:
+                        if i<i_near and inductive_jtor[i]<inductive_jtor[i_near]:
+                            inductive_jtor[i]=inductive_jtor[i_near]
+
+                #Approximately monotonic decreasing inductive current near the core...
+                damping_fac=0.5
+                j_spline = InterpolatedUnivariateSpline(psi, inductive_jtor, k=4)
+                j_spline_d = j_spline.derivative()
+                cr_pts = j_spline_d.roots()
+                inboard_max_pts=[]
+                if len(cr_pts)>0:
+                    inboard_max_pts = [x for x in cr_pts if (j_spline_d(x,1)<0 and  x<0.2)] #no local maxima near the core... 
+                if len(inboard_max_pts)>0:
+                    for i in range(len(inductive_jtor)):
+                        if psi[i]<inboard_max_pts[0]:
+                            inductive_jtor[i]=inductive_jtor[i]-damping_fac*(inductive_jtor[i]-j_spline(inboard_max_pts[0]))
+
+                #Rescale inductive current profile
+                if self._Ip_target.value != -1.E99 and not init_Lmode: #    We don't rescale inductive_jtor unless we are getting the proper, full bootstrap current from the pedestal... no init_Lmode here
+                    total_BS_current=cross_section_surf_int(j_BS,r_avgs[2])
+                    inductive_jtor,rescling_fac=rescale_Jtor(inductive_jtor,(self._Ip_target.value-total_BS_current),r_avgs[2],verbose=plot_iteration)
+                    total_ind_current=self._Ip_target.value-total_BS_current
+                flag_end=False
+            else:
+                flag_end=True
+                q_1_psi_location=None
+            #DYNAMO
+                
+            jtor_total = inductive_jtor + j_BS
+
+            if plot_iteration:
+                if iteration==0:
+                    ax[0].plot(psi_norm,inductive_jtor,label=r"$J_{inductive}$",color='b',alpha=0.5)
+                    ax[0].plot(psi_norm,j_BS,label=r"$J_{bootstrap}$",color='r',alpha=0.5)
+                    ax[0].plot(psi_norm,jtor_total,label=r"$J_{total}$",color='k',linestyle='dotted',alpha=0.5)
+                else:
+                    ax[0].plot(psi_norm,j_BS,color='r',alpha=(0.5+0.5*(iteration+2)/(max_iterations+2)))
+                    ax[0].plot(psi_norm,jtor_total,color='k',linestyle='dotted',alpha=(0.5+0.5*(iteration+2)/(max_iterations+2)))
+                    ax[0].plot(psi_norm,inductive_jtor,color='b',alpha=(0.5+0.5*(iteration+2)/(max_iterations+2)))
+        else:
+            j_BS = None
+            flux_surf_avg_of_B_timesj_BS = None
+            inductive_jtor[-1] = 0. ### FORCING inductive_jtor TO BE ZERO AT THE EDGE
+            jtor_total = inductive_jtor
+            if plot_iteration:
+                ax[0].plot(psi_norm,inductive_jtor,label=f'J {iteration} (L-mode init)')
+        
+        ffprime = ffprime_from_jtor_pprime(jtor_total, pprime, R_avg, one_over_R_avg)
+        if plot_iteration: 
+            if iteration==0:
+                ax[1].plot(psi_norm,ffprime,label=r"$FF'$ input",color='r',alpha=0.5)
+                ax[1].plot(psi_norm,f*fp,label=r"$FF'$ output",color='k',linestyle='dotted',alpha=0.5)
+            else:
+                ax[1].plot(psi_norm,ffprime,color='r',alpha=(0.5+0.5*(iteration+2)/(max_iterations+2)))
+                ax[1].plot(psi_norm,f*fp,color='k',linestyle='dotted',alpha=(0.5+0.5*(iteration+2)/(max_iterations+2)))
+            ax[0].legend(loc='best')
+            ax[0].set_ylabel(r"$J_{tor}$")
+            ax[1].legend(loc='best')
+            ax[1].set_ylabel(r"$FF'$")
+            ax[2].set_ylim(bottom=0.0,top=5)
+            ax[2].plot(psi,qvals,color='k',alpha=(0.5+0.5*(iteration+2)/(max_iterations+2)))
+            ax[2].set_ylabel(r"$q$")
+            ax[2].legend(loc='best')
+
+        if smooth_inputs:
+            newpsi,ffprime=make_smooth(psi_norm,ffprime,npts=450)
+            newpsi,pprime=make_smooth(psi_norm,pprime,npts=450)
+        else:
+            newpsi=psi_norm
+
+        ffp_prof = {
+            'type': 'linterp',
+            'x': newpsi,
+            'y': ffprime / ffprime[0]
+        }
+
+        pp_prof = {
+            'type': 'linterp',
+            'x': newpsi,
+            'y': pprime / pprime[0]
+        }
+
+        #DYNAMO
+        if plot_iteration:
+            return pp_prof, ffp_prof, j_BS, inductive_jtor, jtor_total, flux_surf_avg_of_B_timesj_BS, flag_end, q_1_psi_location, qvals[0], fig, ax
+        else:
+            return pp_prof, ffp_prof, j_BS, inductive_jtor, jtor_total, flux_surf_avg_of_B_timesj_BS, flag_end, q_1_psi_location, qvals[0]
+
+    if initialize_eq:
+        x_trimmed = psi_norm.tolist().copy()
+        ne_trimmed = ne.tolist().copy()
+        Te_trimmed = Te.tolist().copy()
+        ni_trimmed = ni.tolist().copy()
+        Ti_trimmed = Ti.tolist().copy()
+
+        ### Remove profile values from psi_norm ~0.5 to ~0.99, leaving single value at the edge
+        mid_index = int(len(x_trimmed)/2)
+        end_index = len(x_trimmed)-1
+        del x_trimmed[mid_index:end_index]
+        del ne_trimmed[mid_index:end_index]
+        del Te_trimmed[mid_index:end_index]
+        del ni_trimmed[mid_index:end_index]
+        del Ti_trimmed[mid_index:end_index]
+
+        ### Fit cubic polynomials through all core and one edge value
+        ne_model = numpy.poly1d(numpy.polyfit(x_trimmed, ne_trimmed, 3))
+        Te_model = numpy.poly1d(numpy.polyfit(x_trimmed, Te_trimmed, 3))
+        ni_model = numpy.poly1d(numpy.polyfit(x_trimmed, ni_trimmed, 3))
+        Ti_model = numpy.poly1d(numpy.polyfit(x_trimmed, Ti_trimmed, 3))
+
+        init_ne = ne_model(psi_norm)
+        init_Te = Te_model(psi_norm)
+        init_ni = ni_model(psi_norm)
+        init_Ti = Ti_model(psi_norm)
+
+        init_pressure = (kBoltz * init_ne * init_Te) + (kBoltz * init_ni * init_Ti)
+
+        ### Initialize equilibirum on L-mode-like P' and inductive j_tor profiles
+        print('>>> Initializing equilibrium with pedestal removed:')
+
+        if plot_iteration: #DYNAMO
+            init_pp_prof, init_ffp_prof, j_BS, inductive_jtor, jtor_total, flux_surf_avg_of_B_timesj_BS, flag_end_deprecated, q_1_psi_location, q0, fig, ax = profile_iteration(self,init_pressure,init_ne,init_ni,init_Te,init_Ti,psi_norm,n_psi,Zeff,inductive_jtor,jBS_scale,Zis,smooth_inputs=smooth_inputs,rescale_ind_Jtor_by_ftr=rescale_ind_Jtor_by_ftr,include_jBS=False,init_Lmode=True,iteration=-1,plot_iteration=plot_iteration,fig=fig,ax=ax,max_iterations=max_iterations)
+        else:
+            init_pp_prof, init_ffp_prof, j_BS, inductive_jtor, jtor_total, flux_surf_avg_of_B_timesj_BS, flag_end_deprecated, q_1_psi_location, q0, = profile_iteration(self,init_pressure,init_ne,init_ni,init_Te,init_Ti,psi_norm,n_psi,Zeff,inductive_jtor,jBS_scale,Zis,smooth_inputs=smooth_inputs,rescale_ind_Jtor_by_ftr=rescale_ind_Jtor_by_ftr,include_jBS=False,init_Lmode=True,)
+
+        q0_vals.append(q0) #DYNAMO 
+        q1_psi_surf.append(q_1_psi_location)
+
+        init_pp_prof['y'][-1] = 0. # Enforce 0.0 at edge
+        init_ffp_prof['y'][-1] = 0. # Enforce 0.0 at edge
+
+        init_pp_prof['y'] = numpy.nan_to_num(init_pp_prof['y'])
+        init_ffp_prof['y'] = numpy.nan_to_num(init_ffp_prof['y'])
+
+        self.set_profiles(ffp_prof=init_ffp_prof,pp_prof=init_pp_prof)
+
+        flag = self.solve()
+
+    if initialize_eq: #Don't rescale by trapped fraction than once... you'll keep peaking the current indefinitely
+        rescale_ind_Jtor_by_ftr=False
+    else:
+        q_1_psi_location=0.2 #this will be instantly overwritten
+
+    if initialize_eq and flag<0:
+        print('Warning: H-mode equilibrium solve errored at initialisation')
+        print(error_reason(flag))
+        return self, flag, None, None, None, None, None, None, None, None, None, None, False
+    ### Specify original H-mode profiles, iterate on bootstrap contribution until reasonably converged
+    n = 0
+    flag = -1
+    print('>>> Iterating on H-mode equilibrium solution:')
+    while n <= max_iterations:
+        print('> Iteration '+str(n)+':')
+
+        if not plot_iteration: 
+            pp_prof, ffp_prof, j_BS, inductive_jtor, jtor_total, flux_surf_avg_of_B_timesj_BS, flag_end_deprecated, q_1_psi_location, q0, = profile_iteration(self,pressure,ne,ni,Te,Ti,psi_norm,n_psi,Zeff,inductive_jtor,jBS_scale,Zis,q_1_psi_location=q_1_psi_location,rescale_ind_Jtor_by_ftr=rescale_ind_Jtor_by_ftr,smooth_inputs=smooth_inputs,iteration=n)
+        else: 
+            pp_prof, ffp_prof, j_BS, inductive_jtor, jtor_total, flux_surf_avg_of_B_timesj_BS, flag_end_deprecated, q_1_psi_location, q0, fig, ax = profile_iteration(self,pressure,ne,ni,Te,Ti,psi_norm,n_psi,Zeff,inductive_jtor,jBS_scale,Zis,q_1_psi_location=q_1_psi_location,rescale_ind_Jtor_by_ftr=rescale_ind_Jtor_by_ftr,smooth_inputs=smooth_inputs,iteration=n,plot_iteration=plot_iteration,fig=fig,ax=ax,max_iterations=max_iterations)
+
+        q0_vals.append(q0)  #DYNAMO
+        q1_psi_surf.append(q_1_psi_location)
+
+        pp_prof['y'][-1] = 0. # Enforce 0.0 at edge
+        ffp_prof['y'][-1] = 0. # Enforce 0.0 at edge
+    
+        pp_prof['y'] = numpy.nan_to_num(pp_prof['y']) # Check for any nan's
+        ffp_prof['y'] = numpy.nan_to_num(ffp_prof['y']) # Check for any nan's
+
+        self.set_profiles(ffp_prof=ffp_prof,pp_prof=pp_prof)
+
+        flag = self.solve()
+
+        _,qvals,ravgs,_,_,_ = self.get_q(npsi=len(j_BS)) #DYNAMO
+        if qvals[0]>1.02 and qvals[0]<1.07: #flag_end_deprecated checks q0 of the previous cycle, so we use this instead
+            flag_end=True
+        else:
+            flag_end=False
+
+        rescale_ind_Jtor_by_ftr=False #Don't rescale by trapped fraction than once... you'll keep peaking the current indefinitely
+        n += 1
+        if flag<0:
+            print('Warning: H-mode equilibrium solve did not converge, solve failed:')
+            print(error_reason(flag))
+            return self, flag, j_BS, jtor_total, flux_surf_avg_of_B_timesj_BS, inductive_jtor, pp_prof, ffp_prof, q0_vals, q1_psi_surf, qvals, pressure[0], flag_end
+        if (flag_end) and (flag >= 0): #DYNAMO
+            print('q0 reduced below 1')
+            break
+        elif (n > max_iterations) and (flag >= 0):
+            print('q0 failed to reduce below 1')
+            break
+        elif n > max_iterations+1:
+            raise TypeError('H-mode equilibrium solve did not converge')
+        self.print_info()  
+        #DYNAMO
+    return self, flag, j_BS, jtor_total, flux_surf_avg_of_B_timesj_BS, inductive_jtor, pp_prof, ffp_prof, q0_vals, q1_psi_surf, qvals, pressure[0], flag_end
+
+def solve_for_psi_crossing(psi,qvals,qmin):
+    qcross=qvals-qmin
+    qmin_arg=numpy.argmin(qcross)
+    qcross_arg=numpy.argmin(abs(qcross))
+
+    if qcross[qmin_arg]>0:
+        print("No need to change anything, q already above qmin")
+        return False,None,None
+    elif qcross[0] > qmin:
+        print("q profile is hollow, aborting.")
+        return False,None,None
+    elif qcross[qcross_arg]==0: #checking special case is necessary, see https://docs.scipy.org/doc/scipy/reference/generated/scipy.interpolate.UnivariateSpline.roots.html
+        psicross=psi[qcross_arg]
+    else:
+        qcross_spln=CubicSpline(psi,qcross)
+        roots=qcross_spln.roots()
+        roots= [x for x in roots if x > 0.0 and x < 1.0] 
+        if len(roots)>0:
+            if len(roots)>3:
+                print("q crosses qmin multiple times... (a) aborting.")
+                return False,None,None
+            if len(roots)==1: #Usual case
+                psicross=roots[0]
+            elif len(roots)==2:  
+                assert qcross[-1]>0 
+                if (roots[1]-roots[0])>0.3 and min(qvals)<(qmin-0.1):
+                    print(roots)
+                    print("q crosses qmin multiple times... (b) aborting.")
+                    return False,None,None
+                else: #small dip beneath qmin, choose crossing on rhs for reshaping...
+                    print("q crosses qmin twice in close proximity.")
+                    psicross=max(roots)
+            elif len(roots)==3: 
+                if (roots[2]-roots[0])>0.3:
+                    print("q crosses qmin multiple times... (c) aborting.")
+                    return False,None,None
+                else:
+                    print("q crosses qmin 3 times in close proximity.")
+                    psicross=max(roots)
+        else:
+            print("cannot find case of q crossing qmin, aborting")
+            return False,None,None
+        
+    return True, psicross, qcross_arg
+
+def ffprime_from_jtor_pprime(jtor, pprime, R_avg, one_over_R_avg):
+    r'''! Convert from J_toroidal to FF' using Grad-Shafranov equation
+    @param jtor Toroidal current profile
+    @param R_avg Flux averaged R, calculated by TokaMaker
+    @param one_over_R_avg Flux averaged 1/R, calculated by TokaMaker
+    @param pprime dP/dPsi profile
+    '''
+    ffprime = (jtor -  R_avg * (-pprime)) * (mu0 / one_over_R_avg)
+                #^the factor of 2.0 is wrong if you look at Freidberg Ideal MHD GS equation
+                #However it's needed to match this function to the version of f*fp that Tokamaker outputs from get_profiles,
+                #which is equal to twice the FFp from Ideal MHD (Freidberg)
+    return ffprime
+
+def jtor_from_ffprime_pprime(ffprime, pprime, R_avg, one_over_R_avg):
+    r'''! Convert from FF' to J_toroidal using Grad-Shafranov equation
+    @param ffprime F*(dF/dpsi), for flux function F in Grad-Shafranov equation
+    @param R_avg Flux averaged R, calculated by TokaMaker
+    @param one_over_R_avg Flux averaged 1/R, calculated by TokaMaker
+    @param pprime dP/dPsi profile
+    '''
+    jtor = R_avg * (-pprime) + one_over_R_avg*ffprime/mu0
+    return jtor
 
 def cross_section_surf_int(profile,a_avgs):
     profile_inductive_integration_spline=CubicSpline(a_avgs,a_avgs*profile)
@@ -1658,72 +2093,55 @@ def cross_section_surf_int(profile,a_avgs):
 
 def rescale_Jtor(jtor_total,Ip_target,a_avgs,verbose=True):
     #eq_stats = self.get_stats() self,psi_norm,R_avgs,
-
     Jtorr_inductive_integration_spline=CubicSpline(a_avgs,a_avgs*jtor_total)
     cross_section_surf_int=2*numpy.pi*Jtorr_inductive_integration_spline.integrate(min(a_avgs), max(a_avgs), extrapolate=False)
-
     rescaling_factor=Ip_target/cross_section_surf_int
-
     if verbose:
         print(f'current rescaling factor = {rescaling_factor}')
     return jtor_total*rescaling_factor, rescaling_factor
 
 def get_pprime(psi_norm,pressure,one_on_tot_pol_flux):
-    pressure_spln=make_interp_spline(psi_norm,pressure,k=3)
-
+    pressure_spln=InterpolatedUnivariateSpline(psi_norm,pressure,k=3)
     pressure_gradient_points=numpy.zeros(len(psi_norm))
     for i in range(len(psi_norm)):
         pressure_gradient_points[i]=pressure_spln(psi_norm[i],1)
-    
     return pressure_gradient_points * one_on_tot_pol_flux #units: Pa/Wb
 
 # Function basically makes a loose spline of inputs, then re-samples at high res... gets rid of quirky discontinuities in Sauter bootstrap function, and 
 # in your pressure profile input (if it has them). Also helps make sure forcing edge value to zero doesn't create a discontinuity at the edge.
-def make_smooth(psi_norm,input_vec,ped_spot=(0.95**2),pedsepl=0.1,pedsepr=0.005,endsep=0.01,npts=200,endzero=True):
+def make_smooth(psi_norm,input_vec,ped_spot=(0.95**2),preped_grid=20,pedsepl=0.1,pedsepr=0.005,endsep=0.01,npts=200,endzero=True):
     input_spln=CubicSpline(psi_norm,input_vec)
     origsize=len(psi_norm)
-    preped_grid=20
     ped_grid=50
     preped_range=ped_spot-pedsepl
-
     if not endzero:
         endsep=0.0
-
     ped_range=(1.0-endsep)-(ped_spot+pedsepr)
-
     psigrid=[]
     valgrid=[]
-
     for i in range(preped_grid):
         psi_n=(i/(preped_grid-1))*preped_range
         psigrid.append(psi_n)
         samplept=input_spln(psi_n)
         valgrid.append(samplept)
-
     for i in range(10):
         psi_n=preped_range+((i+1)/(10))*0.9*pedsepl
         psigrid.append(psi_n)
         samplept=input_spln(psi_n)
         valgrid.append(samplept)
-
     for i in range(ped_grid):
         psi_n=ped_spot+pedsepr+(i/(ped_grid-1))*ped_range
         psigrid.append(psi_n)
         samplept=input_spln(psi_n)
         valgrid.append(samplept)
-
     if endzero:
         psigrid.append(1.0)
         valgrid.append(0.0)
-
     smoothed_spline=CubicSpline(numpy.array(psigrid),numpy.array(valgrid))
-
     new_psi=numpy.linspace(0.,1.,max(npts,origsize))
     output_vec=numpy.zeros(len(new_psi))
-
     for i in range(len(new_psi)):
         output_vec[i]=smoothed_spline(new_psi[i])
-
     return new_psi,output_vec
 
 # Local interpretation of internal fortran error messages
@@ -1747,5 +2165,4 @@ def error_reason(error_flag):
             return 'Wall eigenmode flux loop fitting failed'
         case default:
             return 'Unkown reason'
-
     return 
