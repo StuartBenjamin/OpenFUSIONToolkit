@@ -2146,23 +2146,21 @@ def make_smooth(psi_norm,input_vec,ped_spot=(0.95**2),preped_grid=20,pedsepl=0.1
 
 # Local interpretation of internal fortran error messages
 def error_reason(error_flag):
-    match error_flag:
-        case -1:
-            return 'Exceeded "maxits"'
-        case -2:
-            return 'Total poloidal flux is zero'
-        case -3:
-            return 'Closed flux volume lost'
-        case -4:
-            return 'Axis dropped below "rmin"'
-        case -5:
-            return 'Toroidal current droppped too low'
-        case -6:
-            return 'Matrix solve failed for targets'
-        case -7:
-            return 'Isoflux fitting failed'
-        case -8:
-            return 'Wall eigenmode flux loop fitting failed'
-        case default:
-            return 'Unkown reason'
-    return 
+    if error_flag==-1:
+        return'Exceeded "maxits"'
+    elif error_flag==-2:
+        return'Total poloidal flux is zero'
+    elif error_flag==-3:
+        return'Closed flux volume lost'
+    elif error_flag==-4:
+        return'Axis dropped below "rmin"'
+    elif error_flag==-5:
+        return'Toroidal current droppped too low'
+    elif error_flag==-6:
+        return'Matrix solve failed for targets'
+    elif error_flag==-7:
+        return'Isoflux fitting failed'
+    elif error_flag==-8:
+        return'Wall eigenmode flux loop fitting failed'
+
+    return'Unkown reason'
