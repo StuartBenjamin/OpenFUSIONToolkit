@@ -1265,6 +1265,8 @@ class TokaMaker():
         @param maxsteps Field line tracer max number of steps above default (8e4)
         @param ttol Field line tracer tolerance near separatrix 
         '''
+        if len(filename) > 80:
+            raise ValueError('"filename cannot be longer than 80 characters')
         cfilename = c_char_p(filename.encode())
         if len(run_info) > 36:
             raise ValueError('"run_info" cannot be longer than 36 characters')
@@ -1305,7 +1307,8 @@ class TokaMaker():
             psi = numpy.linspace(0.0,0.0,npsi+1,dtype=numpy.float64)
             if gpow == 0: 
                 gpow=-2 
-
+        if len(filename) > 80:
+            raise ValueError('"filename cannot be longer than 80 characters')
         cfilename = c_char_p(filename.encode())
         cstring = c_char_p(b""*200)
         tokamaker_save_decon(cfilename,c_int(npsi),psi,c_int(ntheta),c_double(lcfs_pad),cstring,c_int(meshsearch),c_int(maxsteps),c_double(ttol),c_int(gpow))
@@ -1335,7 +1338,8 @@ class TokaMaker():
             psi = numpy.linspace(0.0,0.0,npsi+1,dtype=numpy.float64)
             if gpow == 0: 
                 gpow=-2
-
+        if len(filename) > 80:
+            raise ValueError('"filename cannot be longer than 80 characters')
         cfilename = c_char_p(filename.encode())
         cstring = c_char_p(b""*200)
         tokamaker_save_ifile(cfilename,c_int(npsi),psi,c_int(ntheta),c_double(lcfs_pad),cstring,c_int(meshsearch),c_int(maxsteps),c_double(ttol),c_int(gpow))
@@ -1649,7 +1653,8 @@ def solve_with_bootstrap(self,ne,Te,ni,Ti,inductive_jtor,Zeff,smooth_inputs=True
             break
         elif n > max_iterations+1:
             raise TypeError('H-mode equilibrium solve did not converge')
-        self.print_info()
+        if plot_iteration:
+            self.print_info()
     return self, flag, j_BS, jtor_total, flux_surf_avg_of_B_timesj_BS, inductive_jtor, pp_prof, ffp_prof, pressure[0]
 
 
@@ -2014,7 +2019,8 @@ def basic_dynamo_w_bootstrap(self,ne,Te,ni,Ti,inductive_jtor,Zeff,smooth_inputs=
             break
         elif n > max_iterations+1:
             raise TypeError('H-mode equilibrium solve did not converge')
-        self.print_info()  
+        if plot_iteration:
+            self.print_info()  
         #DYNAMO
     return self, flag, j_BS, jtor_total, flux_surf_avg_of_B_timesj_BS, inductive_jtor, pp_prof, ffp_prof, q0_vals, q1_psi_surf, qvals, pressure[0], flag_end
 
