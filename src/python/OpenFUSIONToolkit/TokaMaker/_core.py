@@ -1447,7 +1447,7 @@ def solve_with_bootstrap(self,ne,Te,ni,Ti,inductive_jtor,Zeff,smooth_inputs=True
 
         ### Get final remaining quantities for Sauter from TokaMaker
         psi,f,fp,_,_ = self.get_profiles(npsi=n_psi)
-        _,fc,r_avgs,_ = self.sauter_fc(npsi=n_psi)
+        _,fc,r_avgs,modb_avgs = self.sauter_fc(npsi=n_psi)
         ft = 1 - fc # Trapped particle fraction on each flux surface
         eps = r_avgs[2] / r_avgs[0] # Inverse aspect ratio
         _,qvals,ravgs,_,_,_ = self.get_q(npsi=n_psi)
@@ -1503,7 +1503,10 @@ def solve_with_bootstrap(self,ne,Te,ni,Ti,inductive_jtor,Zeff,smooth_inputs=True
                                     dnis_dpsi=[dn_i_dpsi,],
                                     )[0]
             inductive_jtor[-1] = 0. ### FORCING inductive_jtor TO BE ZERO AT THE EDGE
-            j_BS = flux_surf_avg_of_B_timesj_BS*(R_avg / f) ### Convert into [A/m^2] by dividing by <Bt>... should be using <B> instead!!
+            #j_BS = flux_surf_avg_of_B_timesj_BS*(R_avg / f) ### Convert into [A/m^2] by dividing by <Bt>... should be using <B> instead!!
+            print(f"modB mins: {min(f/R_avg)},{min(modb_avgs[0])}")
+            print(f"modB maxs: {max(f/R_avg)},{max(modb_avgs[0])}")
+            j_BS = flux_surf_avg_of_B_timesj_BS/modb_avgs[0]
             j_BS *= jBS_scale ### Scale j_BS by user specified scalar
             j_BS[-1] = 0. ### FORCING j_BS TO BE ZERO AT THE EDGE
 
@@ -1714,7 +1717,7 @@ def basic_dynamo_w_bootstrap(self,ne,Te,ni,Ti,inductive_jtor,Zeff,smooth_inputs=
 
         ### Get final remaining quantities for Sauter from TokaMaker
         psi,f,fp,_,_ = self.get_profiles(npsi=n_psi)
-        _,fc,r_avgs,_ = self.sauter_fc(npsi=n_psi)
+        _,fc,r_avgs,modb_avgs = self.sauter_fc(npsi=n_psi)
         ft = 1 - fc # Trapped particle fraction on each flux surface
         eps = r_avgs[2] / r_avgs[0] # Inverse aspect ratio
         _,qvals,ravgs,_,_,_ = self.get_q(npsi=n_psi)
@@ -1770,7 +1773,10 @@ def basic_dynamo_w_bootstrap(self,ne,Te,ni,Ti,inductive_jtor,Zeff,smooth_inputs=
                                     dnis_dpsi=[dn_i_dpsi,],
                                     )[0]
             inductive_jtor[-1] = 0. ### FORCING inductive_jtor TO BE ZERO AT THE EDGE
-            j_BS = flux_surf_avg_of_B_timesj_BS*(R_avg / f) ### Convert into [A/m^2] by dividing by <Bt>... should be using <B> instead!!
+            #j_BS = flux_surf_avg_of_B_timesj_BS*(R_avg / f) ### Convert into [A/m^2] by dividing by <Bt>... should be using <B> instead!!
+            j_BS = flux_surf_avg_of_B_timesj_BS/modb_avgs[0]
+            print(f"modB mins: {min(f/R_avg)},{min(modb_avgs[0])}")
+            print(f"modB maxs: {max(f/R_avg)},{max(modb_avgs[0])}")
             j_BS *= jBS_scale ### Scale j_BS by user specified scalar
             j_BS[-1] = 0. ### FORCING j_BS TO BE ZERO AT THE EDGE
 
