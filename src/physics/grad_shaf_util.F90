@@ -27,7 +27,7 @@ USE mhd_utils, ONLY: mu0
 USE oft_gs, ONLY: gs_factory, flux_func, gs_dflux, gs_itor_nl, gs_test_bounds, gs_b_interp, &
   gs_get_qprof, gsinv_interp, gs_psi2r, gs_psi2pt, gs_epsilon
 USE oft_gs_profiles
-USE grad_shaf_prof_phys, ONLY: create_jphi_ff, jphi_flux_func
+USE grad_shaf_prof_phys, ONLY: create_jphi_ff, jphi_flux_func, gs_flux_int
 IMPLICIT NONE
 #include "local.h"
 !------------------------------------------------------------------------------
@@ -270,6 +270,50 @@ pvol=pvol*self%psiscale*self%psiscale
 bp_vol=bp_vol*self%psiscale*self%psiscale
 dflux=dflux*self%psiscale
 tflux=tflux*self%psiscale
+!---Diagnostic: compare FEM Ip with flux-surface-integral of jphi profile (jphi_update method)
+SELECT TYPE(prof=>self%I)
+  TYPE IS(jphi_flux_func)
+    BLOCK
+      INTEGER(4) :: ii, ngeom_loc
+      REAL(8) :: itor_fsa
+      REAL(8), ALLOCATABLE :: ravgs_loc(:,:), psi_q_loc(:), qtmp_loc(:)
+      TYPE(spline_type) :: R_spl
+      ngeom_loc = prof%ngeom
+      ALLOCATE(ravgs_loc(ngeom_loc+1,3), psi_q_loc(ngeom_loc+1), qtmp_loc(ngeom_loc+1))
+      IF(self%diverted)THEN
+        psi_q_loc = [(REAL(ii-1,8)/REAL(ngeom_loc,8), ii=1,ngeom_loc+1)]
+        psi_q_loc(1) = psi_q_loc(2)
+        CALL gs_get_qprof(self, ngeom_loc, psi_q_loc, qtmp_loc, ravgs=ravgs_loc)
+        psi_q_loc(1) = 0.d0
+        ravgs_loc(1,1) = self%lim_point(1)
+        ravgs_loc(1,2) = 1.d0/self%lim_point(1)
+      ELSE
+        psi_q_loc = [(REAL(ii-1,8)/REAL(ngeom_loc,8), ii=1,ngeom_loc+1)]
+        CALL gs_get_qprof(self, ngeom_loc, psi_q_loc, qtmp_loc, ravgs=ravgs_loc)
+      END IF
+      CALL spline_alloc(R_spl, ngeom_loc-1, 2)
+      R_spl%xs(0:ngeom_loc-2) = psi_q_loc(1:ngeom_loc-1)
+      R_spl%xs(ngeom_loc-1)   = 1.d0
+      R_spl%fs(0:ngeom_loc-2,1) = ravgs_loc(1:ngeom_loc-1,1)
+      R_spl%fs(ngeom_loc-1,1)   = self%o_point(1)
+      R_spl%fs(0:ngeom_loc-2,2) = ravgs_loc(1:ngeom_loc-1,2)
+      R_spl%fs(ngeom_loc-1,2)   = 1.d0/self%o_point(1)
+      CALL spline_fit(R_spl, "extrap")
+      DEALLOCATE(ravgs_loc, psi_q_loc, qtmp_loc)
+      ALLOCATE(qtmp_loc(prof%npsi))
+      DO ii=1,prof%npsi
+        CALL spline_eval(R_spl, prof%x(ii), 0)
+        qtmp_loc(ii) = R_spl%f(1)*R_spl%f(2)
+      END DO
+      CALL gs_flux_int(self, prof%x, prof%jphi/qtmp_loc, prof%npsi, itor_fsa)
+      CALL spline_dealloc(R_spl)
+      DEALLOCATE(qtmp_loc)
+      WRITE(*,'(A,ES14.6,A,ES14.6,A,ES14.6)') &
+        ' Ip  FEM [A]: ', itor/mu0, &
+        '   Ip jphi-FSA [A]: ', itor_fsa, &
+        '   norm. discrepancy: ', (itor/mu0 - itor_fsa)/(itor/mu0)
+    END BLOCK
+END SELECT
 CALL psi_eval%delete
 CALL psi_geval%delete
 end subroutine gs_comp_globals
