@@ -20,6 +20,11 @@ import urllib.request
 from urllib.error import URLError
 
 
+# Verbose build mode: when True, command timeouts are disabled and library
+# build output is streamed to the terminal. Set from the "--verbose" CLI flag.
+verbose_build = False
+
+
 def error_exit(error_str, extra_info=None, exception=None):
     # Exit build script with error
     print("\n\n============  BUILD FAILED!  ============")
@@ -106,14 +111,28 @@ def extract_archive(file):
         error_exit('Extraction failed for file: "{0}"'.format(file), exception=e)
 
 
-def run_command(command, timeout=10, env_vars={}):
+def run_command(command, timeout=10, env_vars={}, stream=False):
     # Run shell command
     my_env = os.environ.copy()
     for key, val in env_vars.items():
         my_env[key] = val
+    if verbose_build:
+        timeout = 60000  # 1000 minutes
     pid = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=my_env)
     # Wait for process to complete or timeout
     try:
+        if stream:
+            # Tee: print live while still capturing for logging/checks
+            chunks = []
+            for raw_line in iter(pid.stdout.readline, b""):
+                line = raw_line.decode("utf-8", errors="replace")
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                chunks.append(line)
+            pid.wait(timeout=timeout)
+            result = "".join(chunks)
+            errcode = pid.poll()
+            return result, errcode
         outs, _ = pid.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         pid.kill()
@@ -720,7 +739,7 @@ class package:
             addl_envs['SDKROOT'] = config_dict['MACOS_SDK_PATH']
         if 'MACOSX_DEPLOYMENT_TARGET' in config_dict:
             addl_envs['MACOSX_DEPLOYMENT_TARGET'] = config_dict['MACOSX_DEPLOYMENT_TARGET']
-        result, _ = run_command("bash build_tmp.sh", timeout=self.build_timeout*60, env_vars=addl_envs)
+        result, _ = run_command("bash build_tmp.sh", timeout=self.build_timeout*60, env_vars=addl_envs, stream=verbose_build)
         with open("build_tmp.log", "w+") as fid:
             fid.write(result)
         # Check for build success
@@ -2133,6 +2152,7 @@ parser.add_argument("--macos_sdk_path", default=None, type=str, help="Path to ma
 parser.add_argument("--macos_deployment_target", default=None, type=str, help="macOS deployment target version, required for python package builds (e.g. 10.15)")
 parser.add_argument("--cross_compile_arch", default=None, type=str, help="Architecture type for cross-compilation")
 parser.add_argument("--no_dl_progress", action="store_false", default=True, help="Do not report progress during file download")
+parser.add_argument("--verbose", action="store_true", default=False, help="Verbose build mode: stream library build output to the terminal and disable command timeouts")
 #
 group = parser.add_argument_group("CMAKE", "CMAKE configure options for the Open FUSION Toolkit")
 group.add_argument("--build_cmake", default=0, type=int, choices=(0,1), help="Build CMAKE instead of using system version? (default: 0)")
@@ -2224,6 +2244,7 @@ group.add_argument("--petsc_wrapper", action="store_true", default=False, help="
 #
 options = parser.parse_args()
 fetch_progress = options.no_dl_progress
+verbose_build = options.verbose
 build_cmake_ver = None
 if options.build_cmake == 1:
     build_cmake_ver = CMAKE().version
