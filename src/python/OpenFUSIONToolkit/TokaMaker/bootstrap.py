@@ -928,7 +928,6 @@ def solve_with_bootstrap(mygs,
             'iterations': (iterations, 3),
             'diagnostic_plots': (diagnostic_plots, False),
             'use_OMFIT_sauter': (use_OMFIT_sauter, False),
-            'verbose': (verbose, True),
             'use_sauter_eps': (use_sauter_eps, True),
         }
         non_default = [k for k, (v, d) in _python_only.items() if v != d]
