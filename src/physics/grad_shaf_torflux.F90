@@ -666,7 +666,11 @@ class(gs_equil), intent(inout) :: gseq !< G-S object
 integer(i4), intent(in) :: nr !< Number of surfaces
 real(r8), intent(in) :: psi_q(nr) !< Surface locations
 real(r8), intent(out) :: g(nr) !< Geometric factor at each surface
-CALL gs_qgeom_cutcell(gseq,nr,psi_q,g)
+IF(torflux_qgeom_backend==1)THEN
+  CALL gs_get_qprof(gseq,nr,psi_q,g,geom_only=.TRUE.)
+ELSE
+  CALL gs_qgeom_cutcell(gseq,nr,psi_q,g)
+END IF
 end subroutine torflux_qgeom
 !------------------------------------------------------------------------------
 !> Sort array ascending and remove near-duplicates
