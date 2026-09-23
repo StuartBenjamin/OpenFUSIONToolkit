@@ -1541,6 +1541,36 @@ ELSE
 END IF
 END SUBROUTINE tokamaker_get_q
 !---------------------------------------------------------------------------------
+!> Evaluate toroidal flux map \f$ 1-\hat{\psi} \leftrightarrow 1-\hat{\Phi} \f$ (internal convention: 0=LCFS, 1=axis)
+!---------------------------------------------------------------------------------
+SUBROUTINE tokamaker_torflux_map(tMaker_equil_ptr,npts,xin,xout,jac,inverse,error_str) BIND(C,NAME="tokamaker_torflux_map")
+TYPE(c_ptr), VALUE, INTENT(in) :: tMaker_equil_ptr !< Pointer to TokaMaker equilibrium object
+INTEGER(c_int), VALUE, INTENT(in) :: npts !< Number of evaluation points
+REAL(c_double), INTENT(in) :: xin(npts) !< \f$ 1-\hat{\psi} \f$ (\f$ 1-\hat{\Phi} \f$ if `inverse`)
+REAL(c_double), INTENT(out) :: xout(npts) !< \f$ 1-\hat{\Phi} \f$ (\f$ 1-\hat{\psi} \f$ if `inverse`)
+REAL(c_double), INTENT(out) :: jac(npts) !< \f$ d\hat{\Phi}/d\hat{\psi} \f$ at each point
+LOGICAL(c_bool), VALUE, INTENT(in) :: inverse !< Map \f$ 1-\hat{\Phi} \rightarrow 1-\hat{\psi} \f$?
+CHARACTER(KIND=c_char), INTENT(out) :: error_str(OFT_ERROR_SLEN) !< Error string (empty if no error)
+INTEGER(i4) :: i
+REAL(r8) :: psihat,phihat
+TYPE(gs_equil), POINTER :: tMaker_equil_obj
+IF(.NOT.tokamaker_equil_ccast(tMaker_equil_ptr,tMaker_equil_obj,error_str))RETURN
+IF((.NOT.tMaker_equil_obj%tmap%active).OR.(tMaker_equil_obj%tmap%ns<2))THEN
+  CALL copy_string('No toroidal flux map (requires an equilibrium with toroidal-flux profiles)',error_str)
+  RETURN
+END IF
+DO i=1,npts
+  IF(inverse)THEN
+    psihat=tMaker_equil_obj%tmap%inv(xin(i))
+    CALL tMaker_equil_obj%tmap%eval(psihat,phihat,jac(i))
+    xout(i)=psihat
+  ELSE
+    CALL tMaker_equil_obj%tmap%eval(xin(i),phihat,jac(i))
+    xout(i)=phihat
+  END IF
+END DO
+END SUBROUTINE tokamaker_torflux_map
+!---------------------------------------------------------------------------------
 !> Evaluate flux surface averages, per-surface shape parameters, and q
 !---------------------------------------------------------------------------------
 SUBROUTINE tokamaker_get_fsa(tMaker_equil_ptr,npsi,psi_q,qvals,ravgs,fsa_avgs,shape_geo,error_str) BIND(C,NAME="tokamaker_get_fsa")

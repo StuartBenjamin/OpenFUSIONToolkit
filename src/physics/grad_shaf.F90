@@ -607,8 +607,9 @@ INTERFACE
     class(flux_func), intent(inout) :: self
   END SUBROUTINE flux_func_build_fint
   !> Update plasma bounds, toroidal flux map, and F*F'/P flux functions
-  MODULE SUBROUTINE gs_update_flux_funcs(equil)
+  MODULE SUBROUTINE gs_update_flux_funcs(equil,settle)
     class(gs_equil), target, intent(inout) :: equil !< G-S object
+    logical, optional, intent(in) :: settle !< Re-place map surfaces until converged (default: `.TRUE.`)
   END SUBROUTINE gs_update_flux_funcs
   !> Copy toroidal flux map and attach it to the flux functions of `self`
   MODULE SUBROUTINE gs_copy_torflux(self,source)
@@ -2725,8 +2726,8 @@ DO i=1,self%maxits
     CALL equil%psi%add(1.d0,equil%vcontrol_val,psi_vcont)
     ffp_scale_prev=equil%ffp_scale
   END IF
-  !---Update flux functions
-  CALL gs_update_flux_funcs(equil)
+  !---Update flux functions (map surfaces settle over iterations)
+  CALL gs_update_flux_funcs(equil,settle=.FALSE.)
   !---Output
   IF(self%save_visit.AND.self%plot_step)THEN
     eq_count=eq_count+1

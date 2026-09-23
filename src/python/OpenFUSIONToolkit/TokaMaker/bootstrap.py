@@ -919,6 +919,7 @@ def solve_with_bootstrap(mygs,
     @param diagnose_bs If True, print the 7 edge-spike fit parameters and the
       parameterized spike profile table to stdout (mirroring the Fortran --diagnose-bs output).
     @result Dictionary with total, bootstrap, inductive, and isolated edge current profiles
+      (internal solver also returns `'psi_n'`, the \f$\hat{\psi}\f$ of each input node)
     '''
 
     if not use_python_solve:
@@ -959,7 +960,8 @@ def solve_with_bootstrap(mygs,
             diagnose_bs=diagnose_bs,
             **kwargs
         )
-        results = {'total_j_phi' : _results['total_j_phi'],
+        results = {'psi_n' : _results['psi_n'],
+                    'total_j_phi' : _results['total_j_phi'],
                     'j_BS' : _results['j_bs_raw'],
                     'j_inductive' : _results['j_ind_final'],
                     'isolated_j_BS' : _results['j_bs_final'],
@@ -967,6 +969,8 @@ def solve_with_bootstrap(mygs,
                     'scale_Ip' : 1.0}
         return results
     else:
+        if kwargs.get('coord', 'psi_n') != 'psi_n':
+            raise ValueError("coord='%s' requires the internal solver (use_python_solve=False)" % kwargs['coord'])
         F0_local = kwargs.get('F0_local', None)
 
     warn(

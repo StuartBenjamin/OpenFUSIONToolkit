@@ -345,7 +345,7 @@ end function flux_func_relabel_f
 !------------------------------------------------------------------------------
 MODULE PROCEDURE gs_update_flux_funcs
 CALL gs_update_bounds(equil)
-CALL gs_update_torflux_map(equil)
+CALL gs_update_torflux_map(equil,settle)
 CALL equil%I%update(equil)
 CALL equil%p%update(equil)
 IF(ASSOCIATED(equil%P_ani))CALL equil%P_ani%update(equil)
@@ -430,21 +430,25 @@ END PROCEDURE flux_coord_name
 !------------------------------------------------------------------------------
 !> Update \f$ \hat{\psi} \rightarrow \hat{\Phi} \f$ map from equilibrium q profile
 !!
-!! Surfaces are placed at the \f$ \hat{\psi} \f$ of each profile node (from the previous
-!! map), with gaps filled to `dphi_max`. The geometric factor \f$ q/F \f$ is traced once;
+!! Surfaces are placed at the \f$ \hat{\psi} \f$ of each profile node, with gaps filled to
+!! `dphi_max`, and re-placed on the updated map until they move less than `place_tol`
+!! (single pass if `settle=.FALSE.`, used inside the nonlinear loop). The geometric factor \f$ q/F \f$ is traced once;
 !! consistency between F and the map (when F*F' is itself on \f$ \hat{\Phi} \f$) is then
 !! obtained by fixed-point iteration without further tracing.
 !------------------------------------------------------------------------------
-subroutine gs_update_torflux_map(gseq)
+subroutine gs_update_torflux_map(gseq,settle)
 class(gs_equil), target, intent(inout) :: gseq !< G-S object
+logical, optional, intent(in) :: settle !< Re-place surfaces until converged (default: `.TRUE.`)
 real(r8), parameter :: pad = 1.d-3 !< Offset of traced surfaces from LCFS and axis
 real(r8), parameter :: dphi_max = 5.d-2 !< Maximum spacing between surfaces in \f$ \hat{\Phi} \f$
 real(r8), parameter :: fp_tol = 1.d-10 !< Fixed-point tolerance on \f$ \hat{\Phi} \f$
 integer(i4), parameter :: fp_maxits = 20
+real(r8), parameter :: place_tol = 1.d-8 !< Surface placement tolerance in \f$ \hat{\psi} \f$
+integer(i4), parameter :: place_maxits = 5
 logical :: active
-integer(i4) :: i,k,n,nfill,it
-real(r8) :: dpsi,a,b,h,err,edge_int
-real(r8), allocatable :: phinodes(:),phitarg(:),psis(:),g(:),q(:),dq(:),cum(:)
+integer(i4) :: i,k,n,nfill,it,ip,npass
+real(r8) :: dpsi,a,b,h,err,edge_int,shift
+real(r8), allocatable :: phinodes(:),phitarg(:),psis(:),pnew(:),g(:),q(:),dq(:),cum(:)
 !---Collect toroidal flux functions and their nodes
 ALLOCATE(phinodes(0))
 active=.FALSE.
@@ -471,79 +475,95 @@ DO k=1,SIZE(phinodes)-1
   phitarg=[phitarg,(phinodes(k)+(phinodes(k+1)-phinodes(k))*REAL(i,r8)/REAL(nfill,r8), i=0,nfill-1)]
 END DO
 phitarg=[phitarg,1.d0]
-!---Surfaces at node locations from previous map
-n=SIZE(phitarg)
-ALLOCATE(psis(n))
-DO i=1,n
-  psis(i)=MIN(MAX(gseq%tmap%inv(phitarg(i)),pad),1.d0-pad)
-END DO
-psis(1)=0.d0; psis(n)=1.d0
-CALL sort_unique(psis)
-n=SIZE(psis)
-IF(n<5)CALL oft_abort('Too few surfaces for toroidal flux map','gs_update_torflux_map',__FILE__)
-!---Trace geometric factor q/F
-ALLOCATE(g(n),q(n),dq(n),cum(n))
-g=0.d0
-CALL torflux_qgeom(gseq,n-2,psis(2:n-1),g(2:n-1))
-g=ABS(g)
-IF(.NOT.fill_failed())THEN
-  CALL oft_warn('Toroidal flux map update failed, keeping previous map')
-  RETURN
+!---Place surfaces at node locations of the current map and re-trace until they settle
+shift=-1.d0
+npass=place_maxits
+IF(PRESENT(settle))THEN
+  IF(.NOT.settle)npass=1
 END IF
-!---Fixed-point iteration for F/map consistency
-IF(ASSOCIATED(gseq%I))gseq%I%plasma_bounds=gseq%plasma_bounds
-dpsi=gseq%plasma_bounds(2)-gseq%plasma_bounds(1)
-DO it=1,fp_maxits
-  DO i=2,n-1
-    q(i)=ABS(fpol(gseq%plasma_bounds(1)+psis(i)*dpsi))*g(i)
+DO ip=1,npass
+  ALLOCATE(pnew(SIZE(phitarg)))
+  DO i=1,SIZE(phitarg)
+    pnew(i)=MIN(MAX(gseq%tmap%inv(phitarg(i)),pad),1.d0-pad)
   END DO
-  !---Axis: quadratic extrapolation
-  q(n)=quad_interp(psis(n-3:n-1),q(n-3:n-1),1.d0)
-  !---Derivatives for Hermite quadrature
-  DO i=3,n-2
-    dq(i)=fd_deriv(psis(i-1:i+1),q(i-1:i+1),2)
-  END DO
-  dq(2)=fd_deriv(psis(2:4),q(2:4),1)
-  dq(n-1)=fd_deriv(psis(n-2:n),q(n-2:n),2)
-  dq(n)=fd_deriv(psis(n-2:n),q(n-2:n),3)
-  !---LCFS: log singularity if diverted, linear extrapolation otherwise
-  IF(gseq%diverted)THEN
-    b=(q(2)-q(3))/LOG(psis(2)/psis(3))
-    a=q(2)-b*LOG(psis(2))
-    edge_int=a*psis(2)+b*(psis(2)*LOG(psis(2))-psis(2))
-    q(1)=q(2)
-  ELSE
-    q(1)=MAX(q(2)-(q(3)-q(2))*psis(2)/(psis(3)-psis(2)),0.d0)
-    edge_int=psis(2)*(q(1)+q(2))/2.d0
+  pnew(1)=0.d0; pnew(SIZE(pnew))=1.d0
+  CALL sort_unique(pnew)
+  IF(ip>1)THEN
+    IF(SIZE(pnew)==n)THEN
+      shift=MAXVAL(ABS(pnew-psis))
+      IF(shift<place_tol)EXIT
+    END IF
+    DEALLOCATE(psis,g,q,dq,cum)
   END IF
-  !---Cumulative integral of q
-  cum(1)=0.d0
-  cum(2)=edge_int
-  DO i=2,n-1
-    h=psis(i+1)-psis(i)
-    cum(i+1)=cum(i)+h*(q(i)+q(i+1))/2.d0+h**2*(dq(i)-dq(i+1))/12.d0
-  END DO
-  !---Store map
-  err=1.d99
-  IF(gseq%tmap%ns==n)err=MAXVAL(ABS(cum/cum(n)-gseq%tmap%phihat))
-  IF(gseq%tmap%ns/=n)THEN
-    CALL gseq%tmap%delete()
-    gseq%tmap%ns=n
-    ALLOCATE(gseq%tmap%psis(n),gseq%tmap%phihat(n),gseq%tmap%jac(n))
+  CALL MOVE_ALLOC(pnew,psis)
+  n=SIZE(psis)
+  IF(n<5)CALL oft_abort('Too few surfaces for toroidal flux map','gs_update_torflux_map',__FILE__)
+  !---Trace geometric factor q/F
+  ALLOCATE(g(n),q(n),dq(n),cum(n))
+  g=0.d0
+  CALL torflux_qgeom(gseq,n-2,psis(2:n-1),g(2:n-1))
+  g=ABS(g)
+  IF(.NOT.fill_failed())THEN
+    CALL oft_warn('Toroidal flux map update failed, keeping previous map')
+    RETURN
   END IF
-  gseq%tmap%Q=cum(n)
-  gseq%tmap%psis=psis
-  gseq%tmap%phihat=cum/cum(n)
-  gseq%tmap%jac=q/cum(n)
-  gseq%tmap%stamp=gseq%tmap%stamp+1
-  CALL tmap_index(gseq%tmap)
-  IF(gseq%I%coord==0)EXIT
-  IF(gseq%I%coord==2)CALL gseq%I%build_fint()
-  IF(err<fp_tol)EXIT
+  !---Fixed-point iteration for F/map consistency
+  IF(ASSOCIATED(gseq%I))gseq%I%plasma_bounds=gseq%plasma_bounds
+  dpsi=gseq%plasma_bounds(2)-gseq%plasma_bounds(1)
+  DO it=1,fp_maxits
+    DO i=2,n-1
+      q(i)=ABS(fpol(gseq%plasma_bounds(1)+psis(i)*dpsi))*g(i)
+    END DO
+    !---Axis: quadratic extrapolation
+    q(n)=quad_interp(psis(n-3:n-1),q(n-3:n-1),1.d0)
+    !---Derivatives for Hermite quadrature
+    DO i=3,n-2
+      dq(i)=fd_deriv(psis(i-1:i+1),q(i-1:i+1),2)
+    END DO
+    dq(2)=fd_deriv(psis(2:4),q(2:4),1)
+    dq(n-1)=fd_deriv(psis(n-2:n),q(n-2:n),2)
+    dq(n)=fd_deriv(psis(n-2:n),q(n-2:n),3)
+    !---LCFS: log singularity if diverted, linear extrapolation otherwise
+    IF(gseq%diverted)THEN
+      b=(q(2)-q(3))/LOG(psis(2)/psis(3))
+      a=q(2)-b*LOG(psis(2))
+      edge_int=a*psis(2)+b*(psis(2)*LOG(psis(2))-psis(2))
+      q(1)=q(2)
+    ELSE
+      q(1)=MAX(q(2)-(q(3)-q(2))*psis(2)/(psis(3)-psis(2)),0.d0)
+      edge_int=psis(2)*(q(1)+q(2))/2.d0
+    END IF
+    !---Cumulative integral of q
+    cum(1)=0.d0
+    cum(2)=edge_int
+    DO i=2,n-1
+      h=psis(i+1)-psis(i)
+      cum(i+1)=cum(i)+h*(q(i)+q(i+1))/2.d0+h**2*(dq(i)-dq(i+1))/12.d0
+    END DO
+    !---Store map
+    err=1.d99
+    IF(gseq%tmap%ns==n)err=MAXVAL(ABS(cum/cum(n)-gseq%tmap%phihat))
+    IF(gseq%tmap%ns/=n)THEN
+      CALL gseq%tmap%delete()
+      gseq%tmap%ns=n
+      ALLOCATE(gseq%tmap%psis(n),gseq%tmap%phihat(n),gseq%tmap%jac(n))
+    END IF
+    gseq%tmap%Q=cum(n)
+    gseq%tmap%psis=psis
+    gseq%tmap%phihat=cum/cum(n)
+    gseq%tmap%jac=q/cum(n)
+    gseq%tmap%stamp=gseq%tmap%stamp+1
+    CALL tmap_index(gseq%tmap)
+    IF(gseq%I%coord==0)EXIT
+    IF(gseq%I%coord==2)CALL gseq%I%build_fint()
+    IF(err<fp_tol)EXIT
+  END DO
 END DO
 IF(oft_debug_print(1))THEN
-  WRITE(*,'(2A,I4,A,I3,A,ES11.3)')oft_indent,'Toroidal flux map: ',n,' surfaces, ',it,' its, Q = ',gseq%tmap%Q
+  WRITE(*,'(2A,I4,A,I3,A,I3,A,ES11.3,A,ES11.3)')oft_indent,'Toroidal flux map: ',n,' surfaces, ', &
+    MIN(ip,npass),' passes, ',it,' its, shift = ',shift,', Q = ',gseq%tmap%Q
 END IF
+IF(ALLOCATED(pnew))DEALLOCATE(pnew)
 DEALLOCATE(phinodes,phitarg,psis,g,q,dq,cum)
 CONTAINS
 !---Register flux function with map

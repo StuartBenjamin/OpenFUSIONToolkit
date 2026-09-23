@@ -29,6 +29,8 @@ def create_prof_file(self, filename, profile_dict, name):
     coord = profile_dict.get('coord','psi_n')
     if coord not in ('psi_n','phi_n','phi_n_relabel'):
         raise ValueError('Invalid coord "{0}" for {1} profile, must be "psi_n", "phi_n", or "phi_n_relabel"'.format(coord, name))
+    if coord == 'phi_n' and (profile_dict['type'].startswith('jphi') or name in ('Te','Ti','ne','ni','Zeff','eta')):
+        raise ValueError('{0} profile ("{1}") on toroidal flux must use coord "phi_n_relabel"'.format(name, profile_dict['type']))
     file_lines = [profile_dict['type'] if coord == 'psi_n' else '{0} {1}'.format(profile_dict['type'], coord)]
     if profile_dict['type'] == 'flat':
         pass
@@ -1521,6 +1523,15 @@ class TokaMaker():
         if self._tMaker_equil is None:
             raise ValueError("Equilibrium object is `None`")
         return self._tMaker_equil.get_q(psi,psi_pad,npsi,compute_geo)
+
+    def get_torflux_map(self,x,inverse=False):
+        r'''! Evaluate the solver's poloidal/toroidal flux map
+
+        See @ref TokaMaker.TokaMaker_equilibrium.get_torflux_map "get_torflux_map"
+        '''
+        if self._tMaker_equil is None:
+            raise ValueError("Equilibrium object is `None`")
+        return self._tMaker_equil.get_torflux_map(x,inverse)
 
     def get_fsa(self,psi=None,psi_pad=0.02,npsi=50):
         r'''! Get flux surface averages and per-surface shape parameters
@@ -3275,6 +3286,28 @@ class TokaMaker_equilibrium():
                 return psi,qvals,ravg_dict,dl.value,rbounds,zbounds
             else:
                 return psi,qvals,ravg_dict,None,None,None
+
+    def get_torflux_map(self,x,inverse=False):
+        r'''! Evaluate the solver's poloidal/toroidal flux map
+
+        Uses the map built during the last solve (or load); requires at least one profile with
+        `coord='phi_n'` or `'phi_n_relabel'`. Stale after `set_psi` until the next solve.
+
+        @param x \f$\hat{\psi}\f$ sampling locations (\f$\hat{\Phi}\f$ if `inverse`)
+        @param inverse Map \f$\hat{\Phi} \rightarrow \hat{\psi}\f$ instead
+        @result \f$\hat{\Phi}(x)\f$ (\f$\hat{\psi}(x)\f$ if `inverse`), \f$d\hat{\Phi}/d\hat{\psi}\f$ at each point
+        '''
+        x = numpy.atleast_1d(numpy.asarray(x, dtype=numpy.float64))
+        xin = numpy.ascontiguousarray(1.0-x if self.psi_convention == 0 else x, dtype=numpy.float64)
+        xout = numpy.zeros_like(xin)
+        jac = numpy.zeros_like(xin)
+        error_string = self._oft_env.get_c_errorbuff()
+        tokamaker_torflux_map(self._equil_ptr,xin.shape[0],xin,xout,jac,inverse,error_string)
+        if error_string.value != b'':
+            raise Exception(error_string.value)
+        if self.psi_convention == 0:
+            xout = 1.0 - xout
+        return xout, jac
 
     def get_fsa(self,psi=None,psi_pad=0.02,npsi=50):
         r'''! Get flux surface averages and per-surface shape parameters
