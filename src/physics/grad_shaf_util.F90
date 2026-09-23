@@ -27,7 +27,7 @@ USE oft_blag_operators, ONLY: oft_blag_project, oft_lag_brinterp, oft_lag_bginte
 USE tracing_2d, ONLY: active_tracer, tracinginv_fs, set_tracer
 USE mhd_utils, ONLY: mu0
 USE oft_gs, ONLY: gs_factory, flux_func, gs_dflux, gs_itor_nl, gs_test_bounds, gs_b_interp, &
-  gsinv_interp, gs_psi2r, gs_psi2pt, gs_epsilon, gs_update_bounds, gs_bcrosskappa
+  gsinv_interp, gs_psi2r, gs_psi2pt, gs_epsilon, gs_update_bounds, gs_bcrosskappa, gs_update_flux_funcs
 USE oft_gs_profiles
 USE grad_shaf_prof_phys, ONLY: jphi_flux_func
 USE grad_shaf_bootstrap, ONLY: jphi_bs_flux_func
@@ -67,6 +67,25 @@ SELECT CASE(TRIM(profType))
 END SELECT
 END SUBROUTINE gs_profile_alloc
 !---------------------------------------------------------------------------------
+!> Save flux function storage coordinate to HDF5 (only if non-default)
+!---------------------------------------------------------------------------------
+SUBROUTINE gs_profile_save_coord(F,filename,path)
+CLASS(flux_func), INTENT(in) :: F !< Flux function object
+CHARACTER(LEN=*), INTENT(in) :: filename !< HDF5 file
+CHARACTER(LEN=*), INTENT(in) :: path !< Profile group path
+IF(F%coord/=0)CALL hdf5_write(F%coord,filename,path//'/COORD')
+END SUBROUTINE gs_profile_save_coord
+!---------------------------------------------------------------------------------
+!> Load flux function storage coordinate from HDF5 (default: psi_n)
+!---------------------------------------------------------------------------------
+SUBROUTINE gs_profile_load_coord(F,filename,path)
+CLASS(flux_func), INTENT(inout) :: F !< Flux function object
+CHARACTER(LEN=*), INTENT(in) :: filename !< HDF5 file
+CHARACTER(LEN=*), INTENT(in) :: path !< Profile group path
+F%coord=0
+IF(hdf5_field_exist(filename,path//'/COORD'))CALL hdf5_read(F%coord,filename,path//'/COORD')
+END SUBROUTINE gs_profile_load_coord
+!---------------------------------------------------------------------------------
 !> Create flux function object from definition file
 !---------------------------------------------------------------------------------
 SUBROUTINE gs_profile_load(filename,F)
@@ -78,13 +97,28 @@ INTEGER(4) :: io_unit
 ! REAL(8), ALLOCATABLE, DIMENSION(:) :: cofs,yvals
 ! INTEGER(4) :: ncofs,npsi,io_unit
 ! LOGICAL :: zero_grad
-CHARACTER(LEN=32) :: profType
-!---
+CHARACTER(LEN=32) :: profType,coordType
+CHARACTER(LEN=128) :: line
+INTEGER(4) :: ios
+!---First line: "<type> [coord]"
 OPEN(NEWUNIT=io_unit,FILE=TRIM(filename))
-READ(io_unit,*)profType
+READ(io_unit,'(A)')line
+coordType='psi_n'
+READ(line,*,IOSTAT=ios)profType,coordType
+IF(ios/=0)READ(line,*)profType
 CALL gs_profile_alloc(profType,F)
 CALL F%load(io_unit)
 CLOSE(io_unit)
+SELECT CASE(TRIM(coordType))
+  CASE("psi_n")
+    F%coord=0
+  CASE("phi_n")
+    F%coord=1
+  CASE("phi_n_relabel")
+    F%coord=2
+  CASE DEFAULT
+    CALL oft_abort('Invalid profile coordinate "'//TRIM(coordType)//'"','gs_profile_load',__FILE__)
+END SELECT
 ! !---
 ! SELECT CASE(TRIM(profType))
 !   CASE("zero")
@@ -380,37 +414,46 @@ CALL hdf5_write(self%ffp_scale,filename,'tokamaker/FFP_SCALE')
 CALL hdf5_write(self%I%f_offset,filename,'tokamaker/F0')
 CALL hdf5_create_group(filename,'tokamaker/FFP_PROFILE')
 CALL self%I%save(filename,'tokamaker/FFP_PROFILE')
+CALL gs_profile_save_coord(self%I,filename,'tokamaker/FFP_PROFILE')
 CALL hdf5_write(self%p_scale,filename,'tokamaker/P_SCALE')
 CALL hdf5_create_group(filename,'tokamaker/PP_PROFILE')
 CALL self%P%save(filename,'tokamaker/PP_PROFILE')
+CALL gs_profile_save_coord(self%P,filename,'tokamaker/PP_PROFILE')
 IF(ASSOCIATED(self%I_NI))THEN
   CALL hdf5_create_group(filename,'tokamaker/NI_PROFILE')
   CALL self%I_NI%save(filename,'tokamaker/NI_PROFILE')
+  CALL gs_profile_save_coord(self%I_NI,filename,'tokamaker/NI_PROFILE')
 END IF
 IF(ASSOCIATED(self%eta))THEN
   CALL hdf5_create_group(filename,'tokamaker/ETA_PROFILE')
   CALL self%eta%save(filename,'tokamaker/ETA_PROFILE')
+  CALL gs_profile_save_coord(self%eta,filename,'tokamaker/ETA_PROFILE')
 END IF
 !---Save kinetic profiles (Te, Ti, ne, ni, Zeff) if set
 IF(ASSOCIATED(self%Te))THEN
   CALL hdf5_create_group(filename,'tokamaker/TE_PROFILE')
   CALL self%Te%save(filename,'tokamaker/TE_PROFILE')
+  CALL gs_profile_save_coord(self%Te,filename,'tokamaker/TE_PROFILE')
 END IF
 IF(ASSOCIATED(self%Ti))THEN
   CALL hdf5_create_group(filename,'tokamaker/TI_PROFILE')
   CALL self%Ti%save(filename,'tokamaker/TI_PROFILE')
+  CALL gs_profile_save_coord(self%Ti,filename,'tokamaker/TI_PROFILE')
 END IF
 IF(ASSOCIATED(self%ne))THEN
   CALL hdf5_create_group(filename,'tokamaker/NE_PROFILE')
   CALL self%ne%save(filename,'tokamaker/NE_PROFILE')
+  CALL gs_profile_save_coord(self%ne,filename,'tokamaker/NE_PROFILE')
 END IF
 IF(ASSOCIATED(self%ni))THEN
   CALL hdf5_create_group(filename,'tokamaker/NI_DENS_PROFILE')
   CALL self%ni%save(filename,'tokamaker/NI_DENS_PROFILE')
+  CALL gs_profile_save_coord(self%ni,filename,'tokamaker/NI_DENS_PROFILE')
 END IF
 IF(ASSOCIATED(self%Zeff))THEN
   CALL hdf5_create_group(filename,'tokamaker/ZEFF_PROFILE')
   CALL self%Zeff%save(filename,'tokamaker/ZEFF_PROFILE')
+  CALL gs_profile_save_coord(self%Zeff,filename,'tokamaker/ZEFF_PROFILE')
 END IF
 ! IF(ASSOCIATED(self%P_ani))THEN
 !   CALL hdf5_create_group(filename,'tokamaker/P_ANI')
@@ -520,6 +563,7 @@ IF(hdf5_field_exist(filename,'tokamaker/TE_PROFILE'))THEN
   CALL gs_profile_alloc(profType,self%Te)
   DEALLOCATE(profType)
   CALL self%Te%load(filename,'tokamaker/TE_PROFILE',success=success)
+  CALL gs_profile_load_coord(self%Te,filename,'tokamaker/TE_PROFILE')
   IF(.NOT.success)THEN
     error_string='Failed to load Te profile.'
     RETURN
@@ -538,6 +582,7 @@ IF(hdf5_field_exist(filename,'tokamaker/TI_PROFILE'))THEN
   CALL gs_profile_alloc(profType,self%Ti)
   DEALLOCATE(profType)
   CALL self%Ti%load(filename,'tokamaker/TI_PROFILE',success=success)
+  CALL gs_profile_load_coord(self%Ti,filename,'tokamaker/TI_PROFILE')
   IF(.NOT.success)THEN
     error_string='Failed to load Ti profile.'
     RETURN
@@ -556,6 +601,7 @@ IF(hdf5_field_exist(filename,'tokamaker/NE_PROFILE'))THEN
   CALL gs_profile_alloc(profType,self%ne)
   DEALLOCATE(profType)
   CALL self%ne%load(filename,'tokamaker/NE_PROFILE',success=success)
+  CALL gs_profile_load_coord(self%ne,filename,'tokamaker/NE_PROFILE')
   IF(.NOT.success)THEN
     error_string='Failed to load ne profile.'
     RETURN
@@ -574,6 +620,7 @@ IF(hdf5_field_exist(filename,'tokamaker/NI_DENS_PROFILE'))THEN
   CALL gs_profile_alloc(profType,self%ni)
   DEALLOCATE(profType)
   CALL self%ni%load(filename,'tokamaker/NI_DENS_PROFILE',success=success)
+  CALL gs_profile_load_coord(self%ni,filename,'tokamaker/NI_DENS_PROFILE')
   IF(.NOT.success)THEN
     error_string='Failed to load ni profile.'
     RETURN
@@ -592,6 +639,7 @@ IF(hdf5_field_exist(filename,'tokamaker/ZEFF_PROFILE'))THEN
   CALL gs_profile_alloc(profType,self%Zeff)
   DEALLOCATE(profType)
   CALL self%Zeff%load(filename,'tokamaker/ZEFF_PROFILE',success=success)
+  CALL gs_profile_load_coord(self%Zeff,filename,'tokamaker/ZEFF_PROFILE')
   IF(.NOT.success)THEN
     error_string='Failed to load Zeff profile.'
     RETURN
@@ -615,6 +663,7 @@ END IF
 CALL gs_profile_alloc(profType,self%I)
 DEALLOCATE(profType)
 CALL self%I%load(filename,'tokamaker/FFP_PROFILE',success=success)
+CALL gs_profile_load_coord(self%I,filename,'tokamaker/FFP_PROFILE')
 IF(.NOT.success)THEN
   error_string="Failed to load F*F' profile."
   RETURN
@@ -641,6 +690,7 @@ END IF
 CALL gs_profile_alloc(profType,self%P)
 DEALLOCATE(profType)
 CALL self%P%load(filename,'tokamaker/PP_PROFILE',success=success)
+CALL gs_profile_load_coord(self%P,filename,'tokamaker/PP_PROFILE')
 IF(.NOT.success)THEN
   error_string="Failed to load P' profile."
   RETURN
@@ -658,6 +708,7 @@ IF(hdf5_field_exist(filename,'tokamaker/NI_PROFILE'))THEN
   CALL gs_profile_alloc(profType,self%I_NI)
   DEALLOCATE(profType)
   CALL self%I_NI%load(filename,'tokamaker/NI_PROFILE',success=success)
+  CALL gs_profile_load_coord(self%I_NI,filename,'tokamaker/NI_PROFILE')
   IF(.NOT.success)THEN
     error_string='Failed to load non-inductive current profile.'
     RETURN
@@ -676,6 +727,7 @@ IF(hdf5_field_exist(filename,'tokamaker/ETA_PROFILE'))THEN
   CALL gs_profile_alloc(profType,self%eta)
   DEALLOCATE(profType)
   CALL self%eta%load(filename,'tokamaker/ETA_PROFILE',success=success)
+  CALL gs_profile_load_coord(self%eta,filename,'tokamaker/ETA_PROFILE')
   IF(.NOT.success)THEN
     error_string='Failed to load ETA profile.'
     RETURN
@@ -834,8 +886,7 @@ IF(hdf5_field_exist(filename,'tokamaker/MIRNOV_TARGETS'))THEN
   END IF
 END IF
 !---Update all flux functions now that all fields (F0, targets, kinetics) are loaded
-CALL self%I%update(self)
-CALL self%P%update(self)
+CALL gs_update_flux_funcs(self)
 IF(ASSOCIATED(self%I_NI))CALL self%I_NI%update(self)
 IF(ASSOCIATED(self%eta))CALL self%eta%update(self)
 end subroutine gs_load_tokamaker
