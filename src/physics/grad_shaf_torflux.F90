@@ -440,7 +440,7 @@ subroutine gs_update_torflux_map(gseq,settle)
 class(gs_equil), target, intent(inout) :: gseq !< G-S object
 logical, optional, intent(in) :: settle !< Re-place surfaces until converged (default: `.TRUE.`)
 real(r8), parameter :: pad = 1.d-3 !< Offset of traced surfaces from LCFS and axis
-real(r8), parameter :: dphi_max = 5.d-2 !< Maximum spacing between surfaces in \f$ \hat{\Phi} \f$
+real(r8), parameter :: dphi_max = 1.d-2 !< Maximum spacing between surfaces in \f$ \hat{\Phi} \f$
 real(r8), parameter :: fp_tol = 1.d-10 !< Fixed-point tolerance on \f$ \hat{\Phi} \f$
 integer(i4), parameter :: fp_maxits = 20
 real(r8), parameter :: place_tol = 1.d-8 !< Surface placement tolerance in \f$ \hat{\psi} \f$
