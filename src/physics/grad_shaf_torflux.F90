@@ -434,8 +434,8 @@ END PROCEDURE flux_coord_name
 !> Update \f$ \hat{\psi} \rightarrow \hat{\Phi} \f$ map from equilibrium q profile
 !!
 !! Surfaces are placed at the \f$ \hat{\psi} \f$ of each profile node, with gaps filled to
-!! `dphi_max`, and re-placed on the updated map until they move less than `place_tol`
-!! (single pass if `settle=.FALSE.`, used inside the nonlinear loop). The geometric factor \f$ q/F \f$ is traced once;
+!! `dphi_max`, plus fixed surfaces near the LCFS and axis. They are re-placed on the updated map
+!! until they move less than `place_tol` (single pass if `settle=.FALSE.`, used inside the nonlinear loop). The geometric factor \f$ q/F \f$ is traced once;
 !! consistency between F and the map (when F*F' is itself on \f$ \hat{\Phi} \f$) is then
 !! obtained by fixed-point iteration without further tracing.
 !------------------------------------------------------------------------------
@@ -443,7 +443,9 @@ subroutine gs_update_torflux_map(gseq,settle,ierr)
 class(gs_equil), target, intent(inout) :: gseq !< G-S object
 logical, optional, intent(in) :: settle !< Re-place surfaces until converged (default: `.TRUE.`)
 integer(i4), intent(out) :: ierr !< 0 ok, 1 update failed (previous map kept), 2 no closed surfaces (degenerate or non-finite bounds)
-real(r8), parameter :: pad = 1.d-3 !< Offset of traced surfaces from LCFS and axis
+real(r8), parameter :: pad = 1.d-3 !< Minimum offset of node surfaces from LCFS and axis
+real(r8), parameter :: edge_s(2) = [1.d-4,1.d-3] !< Fixed surfaces near the LCFS (edge singularity fit)
+real(r8), parameter :: axis_s(2) = [1.d-3,3.d-3] !< Fixed surfaces near the axis (axis extrapolation)
 real(r8), parameter :: dphi_max = 1.d-2 !< Maximum spacing between surfaces in \f$ \hat{\Phi} \f$
 real(r8), parameter :: fp_tol = 1.d-10 !< Fixed-point tolerance on \f$ \hat{\Phi} \f$
 integer(i4), parameter :: fp_maxits = 20
@@ -451,8 +453,8 @@ real(r8), parameter :: place_tol = 1.d-8 !< Surface placement tolerance in \f$ \
 integer(i4), parameter :: place_maxits = 5
 logical :: active
 integer(i4) :: i,k,n,nfill,it,ip,npass
-real(r8) :: dpsi,a,b,h,err,edge_int,shift
-real(r8), allocatable :: phinodes(:),phitarg(:),psis(:),pnew(:),g(:),q(:),dq(:),cum(:)
+real(r8) :: dpsi,b,h,err,shift
+real(r8), allocatable :: phinodes(:),phitarg(:),psis(:),pnew(:),g(:),q(:),r(:),dq(:),cum(:)
 ierr=0
 !---Collect toroidal flux functions and their nodes
 ALLOCATE(phinodes(0))
@@ -498,13 +500,14 @@ DO ip=1,npass
     pnew(i)=MIN(MAX(gseq%tmap%inv(phitarg(i)),pad),1.d0-pad)
   END DO
   pnew(1)=0.d0; pnew(SIZE(pnew))=1.d0
+  pnew=[pnew,edge_s,1.d0-axis_s]
   CALL sort_unique(pnew)
   IF(ip>1)THEN
     IF(SIZE(pnew)==n)THEN
       shift=MAXVAL(ABS(pnew-psis))
       IF(shift<place_tol)EXIT
     END IF
-    DEALLOCATE(psis,g,q,dq,cum)
+    DEALLOCATE(psis,g,q,r,dq,cum)
   END IF
   CALL MOVE_ALLOC(pnew,psis)
   n=SIZE(psis)
@@ -513,7 +516,7 @@ DO ip=1,npass
     RETURN
   END IF
   !---Trace geometric factor q/F
-  ALLOCATE(g(n),q(n),dq(n),cum(n))
+  ALLOCATE(g(n),q(n),r(n),dq(n),cum(n))
   g=0.d0
   CALL torflux_qgeom(gseq,n-2,psis(2:n-1),g(2:n-1))
   g=ABS(g)
@@ -530,29 +533,33 @@ DO ip=1,npass
     END DO
     !---Axis: quadratic extrapolation
     q(n)=quad_interp(psis(n-3:n-1),q(n-3:n-1),1.d0)
-    !---Derivatives for Hermite quadrature
-    DO i=3,n-2
-      dq(i)=fd_deriv(psis(i-1:i+1),q(i-1:i+1),2)
-    END DO
-    dq(2)=fd_deriv(psis(2:4),q(2:4),1)
-    dq(n-1)=fd_deriv(psis(n-2:n),q(n-2:n),2)
-    dq(n)=fd_deriv(psis(n-2:n),q(n-2:n),3)
-    !---LCFS: log singularity if diverted, linear extrapolation otherwise
+    !---LCFS: q ~ a + b*ln(s) if diverted, linear extrapolation otherwise
+    b=0.d0
     IF(gseq%diverted)THEN
       b=(q(2)-q(3))/LOG(psis(2)/psis(3))
-      a=q(2)-b*LOG(psis(2))
-      edge_int=a*psis(2)+b*(psis(2)*LOG(psis(2))-psis(2))
       q(1)=q(2)
     ELSE
       q(1)=MAX(q(2)-(q(3)-q(2))*psis(2)/(psis(3)-psis(2)),0.d0)
-      edge_int=psis(2)*(q(1)+q(2))/2.d0
     END IF
-    !---Cumulative integral of q
+    !---Integrate r = q - b*ln(s) by Hermite quadrature and b*ln(s) exactly
+    r(1)=q(1)
+    r(2:n)=q(2:n)-b*LOG(psis(2:n))
+    DO i=3,n-2
+      dq(i)=fd_deriv(psis(i-1:i+1),r(i-1:i+1),2)
+    END DO
+    dq(2)=fd_deriv(psis(2:4),r(2:4),1)
+    dq(n-1)=fd_deriv(psis(n-2:n),r(n-2:n),2)
+    dq(n)=fd_deriv(psis(n-2:n),r(n-2:n),3)
     cum(1)=0.d0
-    cum(2)=edge_int
+    IF(gseq%diverted)THEN
+      cum(2)=r(2)*psis(2)+b*xlogx(psis(2))
+    ELSE
+      cum(2)=psis(2)*(q(1)+q(2))/2.d0
+    END IF
     DO i=2,n-1
       h=psis(i+1)-psis(i)
-      cum(i+1)=cum(i)+h*(q(i)+q(i+1))/2.d0+h**2*(dq(i)-dq(i+1))/12.d0
+      cum(i+1)=cum(i)+h*(r(i)+r(i+1))/2.d0+h**2*(dq(i)-dq(i+1))/12.d0 &
+        +b*(xlogx(psis(i+1))-xlogx(psis(i)))
     END DO
     IF(.NOT.((cum(n)>0.d0).AND.(cum(n)<HUGE(cum(n))).AND.ALL(q(2:n)>=0.d0)))THEN
       CALL map_failed('non-finite q')
@@ -582,7 +589,7 @@ IF(oft_debug_print(1))THEN
     MIN(ip,npass),' passes, ',it,' its, shift = ',shift,', Q = ',gseq%tmap%Q
 END IF
 IF(ALLOCATED(pnew))DEALLOCATE(pnew)
-DEALLOCATE(phinodes,phitarg,psis,g,q,dq,cum)
+DEALLOCATE(phinodes,phitarg,psis,g,q,r,dq,cum)
 CONTAINS
 !---Warn and flag a failed update (previous map is kept)
 subroutine map_failed(reason)
@@ -611,6 +618,12 @@ ELSE
   F=SIGN(1.d0,gseq%I%f_offset)*SQRT(MAX(gseq%ffp_scale*gseq%I%f(psi)+gseq%I%f_offset**2,0.d0))
 END IF
 end function fpol
+!---Antiderivative of ln(s)
+pure function xlogx(s) result(v)
+real(r8), intent(in) :: s
+real(r8) :: v
+v=s*LOG(s)-s
+end function xlogx
 !---Replace failed traces (g=0) by linear interpolation, .FALSE. if too few remain
 function fill_failed() result(ok)
 logical :: ok
