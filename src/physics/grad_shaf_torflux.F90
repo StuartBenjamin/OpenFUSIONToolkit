@@ -344,8 +344,11 @@ end function flux_func_relabel_f
 !> Update plasma bounds, toroidal flux map, and F*F'/P flux functions
 !------------------------------------------------------------------------------
 MODULE PROCEDURE gs_update_flux_funcs
+integer(i4) :: map_err
 CALL gs_update_bounds(equil)
-CALL gs_update_torflux_map(equil,settle)
+CALL gs_update_torflux_map(equil,settle,map_err)
+IF(PRESENT(ierr))ierr=map_err
+IF(map_err==2)RETURN ! Nothing sensible to evaluate profiles on
 CALL equil%I%update(equil)
 CALL equil%p%update(equil)
 IF(ASSOCIATED(equil%P_ani))CALL equil%P_ani%update(equil)
@@ -436,9 +439,10 @@ END PROCEDURE flux_coord_name
 !! consistency between F and the map (when F*F' is itself on \f$ \hat{\Phi} \f$) is then
 !! obtained by fixed-point iteration without further tracing.
 !------------------------------------------------------------------------------
-subroutine gs_update_torflux_map(gseq,settle)
+subroutine gs_update_torflux_map(gseq,settle,ierr)
 class(gs_equil), target, intent(inout) :: gseq !< G-S object
 logical, optional, intent(in) :: settle !< Re-place surfaces until converged (default: `.TRUE.`)
+integer(i4), intent(out) :: ierr !< 0 ok, 1 update failed (previous map kept), 2 no closed surfaces (degenerate or non-finite bounds)
 real(r8), parameter :: pad = 1.d-3 !< Offset of traced surfaces from LCFS and axis
 real(r8), parameter :: dphi_max = 1.d-2 !< Maximum spacing between surfaces in \f$ \hat{\Phi} \f$
 real(r8), parameter :: fp_tol = 1.d-10 !< Fixed-point tolerance on \f$ \hat{\Phi} \f$
@@ -449,6 +453,7 @@ logical :: active
 integer(i4) :: i,k,n,nfill,it,ip,npass
 real(r8) :: dpsi,a,b,h,err,edge_int,shift
 real(r8), allocatable :: phinodes(:),phitarg(:),psis(:),pnew(:),g(:),q(:),dq(:),cum(:)
+ierr=0
 !---Collect toroidal flux functions and their nodes
 ALLOCATE(phinodes(0))
 active=.FALSE.
@@ -464,6 +469,12 @@ CALL add_func(gseq%Zeff)
 gseq%tmap%active=active
 IF((.NOT.active).OR.(gseq%plasma_bounds(1)<-1.d98))THEN
   IF(gseq%tmap%ns>0)CALL gseq%tmap%delete()
+  RETURN
+END IF
+dpsi=gseq%plasma_bounds(2)-gseq%plasma_bounds(1)
+IF(.NOT.((ABS(dpsi)>0.d0).AND.(ABS(dpsi)<HUGE(dpsi))))THEN
+  CALL oft_warn('Toroidal flux map update skipped, no closed flux surfaces')
+  ierr=2
   RETURN
 END IF
 !---Target 1-Phi-hat values: [0,1] + nodes, gaps filled to dphi_max
@@ -497,14 +508,17 @@ DO ip=1,npass
   END IF
   CALL MOVE_ALLOC(pnew,psis)
   n=SIZE(psis)
-  IF(n<5)CALL oft_abort('Too few surfaces for toroidal flux map','gs_update_torflux_map',__FILE__)
+  IF(n<5)THEN
+    CALL map_failed('too few surfaces')
+    RETURN
+  END IF
   !---Trace geometric factor q/F
   ALLOCATE(g(n),q(n),dq(n),cum(n))
   g=0.d0
   CALL torflux_qgeom(gseq,n-2,psis(2:n-1),g(2:n-1))
   g=ABS(g)
   IF(.NOT.fill_failed())THEN
-    CALL oft_warn('Toroidal flux map update failed, keeping previous map')
+    CALL map_failed('surface traces failed')
     RETURN
   END IF
   !---Fixed-point iteration for F/map consistency
@@ -540,6 +554,10 @@ DO ip=1,npass
       h=psis(i+1)-psis(i)
       cum(i+1)=cum(i)+h*(q(i)+q(i+1))/2.d0+h**2*(dq(i)-dq(i+1))/12.d0
     END DO
+    IF(.NOT.((cum(n)>0.d0).AND.(cum(n)<HUGE(cum(n))).AND.ALL(q(2:n)>=0.d0)))THEN
+      CALL map_failed('non-finite q')
+      RETURN
+    END IF
     !---Store map
     err=1.d99
     IF(gseq%tmap%ns==n)err=MAXVAL(ABS(cum/cum(n)-gseq%tmap%phihat))
@@ -566,6 +584,12 @@ END IF
 IF(ALLOCATED(pnew))DEALLOCATE(pnew)
 DEALLOCATE(phinodes,phitarg,psis,g,q,dq,cum)
 CONTAINS
+!---Warn and flag a failed update (previous map is kept)
+subroutine map_failed(reason)
+CHARACTER(LEN=*), INTENT(in) :: reason
+CALL oft_warn('Toroidal flux map update failed ('//reason//'), keeping previous map')
+ierr=1
+end subroutine map_failed
 !---Register flux function with map
 subroutine add_func(F)
 CLASS(flux_func), POINTER, INTENT(in) :: F

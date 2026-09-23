@@ -607,9 +607,10 @@ INTERFACE
     class(flux_func), intent(inout) :: self
   END SUBROUTINE flux_func_build_fint
   !> Update plasma bounds, toroidal flux map, and F*F'/P flux functions
-  MODULE SUBROUTINE gs_update_flux_funcs(equil,settle)
+  MODULE SUBROUTINE gs_update_flux_funcs(equil,settle,ierr)
     class(gs_equil), target, intent(inout) :: equil !< G-S object
     logical, optional, intent(in) :: settle !< Re-place map surfaces until converged (default: `.TRUE.`)
+    integer(i4), optional, intent(out) :: ierr !< Map status: 0 ok, 1 update failed (previous map kept), 2 no closed surfaces (profiles not updated)
   END SUBROUTINE gs_update_flux_funcs
   !> Copy toroidal flux map and attach it to the flux functions of `self`
   MODULE SUBROUTINE gs_copy_torflux(self,source)
@@ -2255,12 +2256,14 @@ REAL(8) :: nl_res,psimax,ffp_scale_in,ffp_scale_prev,itor,pnorm0,pnormp,itor_ffp
 REAL(8) :: R0_tmp,R0_hist(2),gpsi0(3),gpsi1(3),gpsi2(3),t0,t1
 REAL(8) :: param_mat(3,3),mat_save(2,2),param_vec(3),param_rhs(3)
 REAL(r8), POINTER :: saddle_save(:,:)
-integer(4) :: i,ii,j,k,error_flag,cell,ierr_loc
+integer(4) :: i,ii,j,k,error_flag,cell,ierr_loc,ierr_map,map_fails
+integer(4), parameter :: map_fail_max = 3 !< Consecutive toroidal flux map failures before the solve fails
 integer(4), save :: eq_count = 0
 CHARACTER(LEN=40) :: err_reason
 logical :: pm_save,fail_test
 !---
 error_flag=0
+map_fails=0
 self%nl_its=0
 equil%skip_targets=.FALSE.
 IF(TRIM(self%lu_solver%package)=='none')THEN
@@ -2305,7 +2308,8 @@ IF(.NOT.self%free)THEN
 END IF
 !---Update flux functions
 equil%o_point(1)=-1.d0
-CALL gs_update_flux_funcs(equil)
+CALL gs_update_flux_funcs(equil,ierr=ierr_map)
+CALL count_map_fails
 !---Get J_phi source term
 CALL gs_source(equil,equil%psi,rhs,psi_ffp,psi_press,itor_ffp,itor_press,estored,dflux_ffp)
 IF(self%dt>0.d0)THEN
@@ -2402,6 +2406,10 @@ IF(oft_env%pm)THEN
   CALL oft_increase_indent
 END IF
 DO i=1,self%maxits
+  IF(map_fails>=map_fail_max)THEN
+    error_flag=-9
+    EXIT
+  END IF
   !---Ramp R0 target
   R0_tmp=(i-1)*(equil%R0_target-R0_in)/REAL(self%nR0_ramp,8) + R0_in
   Z0_tmp=(i-1)*(equil%Z0_target-Z0_in)/REAL(self%nR0_ramp,8) + Z0_in
@@ -2727,7 +2735,8 @@ DO i=1,self%maxits
     ffp_scale_prev=equil%ffp_scale
   END IF
   !---Update flux functions (map surfaces settle over iterations)
-  CALL gs_update_flux_funcs(equil,settle=.FALSE.)
+  CALL gs_update_flux_funcs(equil,settle=.FALSE.,ierr=ierr_map)
+  CALL count_map_fails
   !---Output
   IF(self%save_visit.AND.self%plot_step)THEN
     eq_count=eq_count+1
@@ -2763,6 +2772,7 @@ DO i=1,self%maxits
   IF((equil%R0_target>0.d0).AND.(ABS(R0_tmp-equil%R0_target)>1.d-8))CYCLE
   IF((equil%Z0_target>-1.d98).AND.(ABS(Z0_tmp-equil%Z0_target)>1.d-8))CYCLE
   ! IF((equil%R0_target>0.d0).AND.(i<self%nR0_ramp))CYCLE
+  IF(map_fails>0)CYCLE ! Do not converge on a stale toroidal flux map
   IF(SQRT(nl_res)<self%nl_tol)EXIT
 end do
 IF(oft_env%pm)CALL oft_decrease_indent
@@ -2842,6 +2852,15 @@ ELSE
     WRITE(*,'(3A)')oft_indent,'Equilibrium solve Failed: ',TRIM(err_reason)
   END IF
 END IF
+CONTAINS
+!---Track consecutive toroidal flux map failures
+subroutine count_map_fails
+IF(ierr_map==0)THEN
+  map_fails=0
+ELSE
+  map_fails=map_fails+1
+END IF
+end subroutine count_map_fails
 end subroutine gs_solve
 !------------------------------------------------------------------------------
 !> Compute solution to linearized Grad-Shafranov without updating \f$ \psi \f$ for RHS
@@ -3338,6 +3357,8 @@ SELECT CASE(ierr)
     err_reason='Isoflux fitting failed'
   CASE(-8)
     err_reason='Wall eigenmode flux loop fitting failed'
+  CASE(-9)
+    err_reason='Toroidal flux map update failed'
   CASE DEFAULT
     err_reason='Unknown reason'
 END SELECT
