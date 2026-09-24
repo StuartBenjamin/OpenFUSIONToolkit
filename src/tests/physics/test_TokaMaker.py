@@ -1442,20 +1442,20 @@ def run_Redl_jBS_case(mesh_resolution, fe_order, mp_q):
 
 
 #============================================================================
-# Validation of the optional `psi_N` grid argument to `solve_with_bootstrap`.
+# Validation of the optional `x` grid argument to `solve_with_bootstrap`.
 # These pin the Python solve path (`use_python_solve=True`); they exercise input
 # checking only, which happens before the solver object is touched, so they are
 # fast and run in the default CI selection.
 @pytest.mark.coverage
-def test_bootstrap_psi_N_validation():
+def test_bootstrap_x_validation():
     from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
     n = 65
     ne = np.full(n, 1.0e20)
     Te = np.full(n, 2.0e3)
     Zeff = np.full(n, 1.7)
-    def call(psi_N):
+    def call(x):
         return solve_with_bootstrap(None, ne, Te, ne.copy(), Te.copy(), Zeff,
-                                    1.0e6, psi_N=psi_N, use_python_solve=True)
+                                    1.0e6, x=x, use_python_solve=True)
     good = np.linspace(0.0, 1.0, n)
     # wrong length
     with pytest.raises(ValueError, match="same length"):
@@ -1478,7 +1478,15 @@ def test_bootstrap_psi_N_validation():
     # psi_pad coarser than the grid would collapse distinct flux surfaces
     with pytest.raises(ValueError, match="larger than the first/last"):
         solve_with_bootstrap(None, ne, Te, ne.copy(), Te.copy(), Zeff, 1.0e6,
-                             psi_N=good, psi_pad=0.5, use_python_solve=True)
+                             x=good, psi_pad=0.5, use_python_solve=True)
+    # deprecated alias psi_N: warns, then validated as x
+    with pytest.warns(DeprecationWarning, match="psi_N"):
+        with pytest.raises(ValueError, match="same length"):
+            solve_with_bootstrap(None, ne, Te, ne.copy(), Te.copy(), Zeff, 1.0e6,
+                                 psi_N=good[:-1], use_python_solve=True)
+    with pytest.raises(ValueError, match="x only"):
+        solve_with_bootstrap(None, ne, Te, ne.copy(), Te.copy(), Zeff, 1.0e6,
+                             x=good, psi_N=good, use_python_solve=True)
 
 
 @pytest.mark.coverage
@@ -2017,11 +2025,11 @@ def run_ITER_torflux_case(fe_order, test_type, mp_q):
             psi_nodes, _ = mygs.get_torflux_map(x_phi,inverse=True)
             results['node_err'] = np.max(np.abs(res_phi['psi_n']-psi_nodes))
             # solve_with_bootstrap: 'psi_n' output; Python solver rejects toroidal coordinates
-            res_swb = solve_with_bootstrap(mygs,ne,Te,ne,Te,1.5,13.0E6,inductive_jphi=jind,psi_N=x_phi,coord='phi_n')
+            res_swb = solve_with_bootstrap(mygs,ne,Te,ne,Te,1.5,13.0E6,inductive_jphi=jind,x=x_phi,coord='phi_n')
             psi_nodes, _ = mygs.get_torflux_map(x_phi,inverse=True)
             results['swb_node_err'] = np.max(np.abs(res_swb['psi_n']-psi_nodes))
             try:
-                solve_with_bootstrap(mygs,ne,Te,ne,Te,1.5,13.0E6,inductive_jphi=jind,psi_N=x_phi,
+                solve_with_bootstrap(mygs,ne,Te,ne,Te,1.5,13.0E6,inductive_jphi=jind,x=x_phi,
                                      use_python_solve=True,coord='phi_n')
                 results['python_rejected'] = False
             except ValueError:

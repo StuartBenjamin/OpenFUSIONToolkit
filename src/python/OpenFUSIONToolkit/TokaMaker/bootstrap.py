@@ -823,50 +823,51 @@ def redl_bootstrap(
 
     return j_bootstrap, coeffs
 
-def _validate_psi_grid(values, name, psi_N=None):
-    r'''! Validate (or build) the normalized flux grid a profile is sampled on
+def _validate_grid(values, name, x=None):
+    r'''! Validate (or build) the normalized radial grid a profile is sampled on
 
     @param values Profile values
     @param name Profile name, used in the raised error message
-    @param psi_N Normalized flux grid `values` is sampled on. If `None`, a uniform
-      grid `numpy.linspace(0,1,len(values))` is used. Otherwise must be finite,
-      strictly increasing, within [0,1], and the same length as `values`.
-    @result Validated \f$\hat{\psi}\f$ grid
+    @param x Normalized radial grid (\f$\hat{\psi}\f$ or \f$\hat{\Phi}\f$) `values` is
+      sampled on. If `None`, a uniform grid `numpy.linspace(0,1,len(values))` is used.
+      Otherwise must be finite, strictly increasing, within [0,1], and the same length
+      as `values`.
+    @result Validated grid
     '''
     values = numpy.asarray(values)
     if len(values) < 3:
         raise ValueError("profiles must contain at least 3 points for second-order "
                          "derivatives (got %d)" % len(values))
-    if psi_N is None:
+    if x is None:
         return numpy.linspace(0., 1., len(values))
-    grid = numpy.asarray(psi_N, dtype=float)
+    grid = numpy.asarray(x, dtype=float)
     if grid.ndim != 1 or grid.size != len(values):
-        raise ValueError("psi_N must be 1D with the same length as the '%s' profile "
+        raise ValueError("x must be 1D with the same length as the '%s' profile "
                          "(got %s, expected (%d,))" % (name, grid.shape, len(values)))
     if not numpy.all(numpy.isfinite(grid)):
-        raise ValueError("psi_N contains non-finite values at indices %s for the '%s' profile"
+        raise ValueError("x contains non-finite values at indices %s for the '%s' profile"
                          % (numpy.flatnonzero(~numpy.isfinite(grid))[:5].tolist(), name))
     if numpy.any(numpy.diff(grid) <= 0.):
-        raise ValueError("psi_N must be strictly increasing; found non-increasing "
+        raise ValueError("x must be strictly increasing; found non-increasing "
                          "steps at indices %s for the '%s' profile (duplicated or "
                          "unsorted flux labels give undefined profile derivatives)"
                          % (numpy.flatnonzero(numpy.diff(grid) <= 0.)[:5].tolist(), name))
     if (grid[0] < 0.) or (grid[-1] > 1.):
-        raise ValueError("psi_N must lie within [0,1] for the '%s' profile (got [%g, %g])"
+        raise ValueError("x must lie within [0,1] for the '%s' profile (got [%g, %g])"
                          % (name, grid[0], grid[-1]))
     return grid
 
-def _default_psi_profile(values, name, psi_N=None, scale=1.0):
-    r'''! Build a {'x','y'} profile dict on the validated `psi_N` grid
+def _default_profile(values, name, x=None, scale=1.0):
+    r'''! Build a {'x','y'} profile dict on the validated grid `x`
 
     @param values Profile values
     @param name Profile name, used in the raised error message
-    @param psi_N Normalized flux grid `values` is sampled on (see `_validate_psi_grid`)
+    @param x Normalized radial grid `values` is sampled on (see `_validate_grid`)
     @param scale Multiplicative scaling applied to `values` (e.g. eV -> keV)
-    @result Profile dict {'x': psi_N, 'y': values * scale}
+    @result Profile dict {'x': x, 'y': values * scale}
     '''
     values = numpy.asarray(values)
-    return {'x': _validate_psi_grid(values, name, psi_N=psi_N), 'y': values * scale}
+    return {'x': _validate_grid(values, name, x=x), 'y': values * scale}
 
 def solve_with_bootstrap(mygs,
                          ne,
@@ -885,21 +886,23 @@ def solve_with_bootstrap(mygs,
                          parameterize_jBS = False,
                          use_OMFIT_sauter = False,
                          verbose = True,
-                         psi_N = None,
+                         x = None,
                          use_sauter_eps = True,
                          diagnose_bs = False,
                          use_python_solve = False,
+                         coord = 'psi_n',
+                         psi_N = None,
                          **kwargs):
     r'''! Self-consistently compute bootstrap current from H-mode profiles
 
     @param mygs Grad-Shafranov solver object
-    @param ne Electron density profile \f$n_e(\hat{\psi})\f$ [m$^{-3}$]
-    @param Te Electron temperature profile \f$T_e(\hat{\psi})\f$ [eV]
-    @param ni Ion density profile \f$n_i(\hat{\psi})\f$ [m$^{-3}$]
-    @param Ti Ion temperature profile \f$T_i(\hat{\psi})\f$ [eV]
-    @param Zeff Effective charge profile \f$Z_{eff}(\hat{\psi})\f$
+    @param ne Electron density profile \f$n_e(x)\f$ [m$^{-3}$]
+    @param Te Electron temperature profile \f$T_e(x)\f$ [eV]
+    @param ni Ion density profile \f$n_i(x)\f$ [m$^{-3}$]
+    @param Ti Ion temperature profile \f$T_i(x)\f$ [eV]
+    @param Zeff Effective charge profile \f$Z_{eff}(x)\f$
     @param Ip_target Target plasma current \f$I_p\f$ [A]
-    @param inductive_jphi Inductive toroidal current profile \f$j_{ind}(\hat{\psi})\f$
+    @param inductive_jphi Inductive toroidal current profile \f$j_{ind}(x)\f$
     @param Zis List of impurity atomic numbers (default: [1.0])
     @param scale_jBS Scaling factor for bootstrap current
     @param isolate_edge_jBS If True, isolate edge spike in bootstrap current
@@ -908,11 +911,14 @@ def solve_with_bootstrap(mygs,
     @param diagnostic_plots If True, plot diagnostic figures
     @param parameterize_jBS If True, use parameterized edge spike
     @param use_OMFIT_sauter If True, use OMFIT Sauter model
-    @param psi_N Normalized flux grid \f$\hat{\psi}\f$ the input profiles are sampled on.
+    @param x Normalized radial grid the input profiles are sampled on, in `coord`.
     If `None` (default) the profiles are assumed evenly sampled and a uniform grid
     `numpy.linspace(0,1,len(ne))` is used. Must be finite, strictly increasing, within
     [0,1], and the same length as the profiles. The number of traced flux surfaces is
-    `len(psi_N)`, so profile resolution sets equilibrium sampling resolution.
+    `len(x)`, so profile resolution sets equilibrium sampling resolution.
+    @param coord Coordinate of `x`: `'psi_n'` (default, \f$\hat{\psi}\f$) or `'phi_n'`
+    (\f$\hat{\Phi}\f$, internal solver only; see `TokaMaker.solve_bootstrap`)
+    @param psi_N Deprecated alias of `x`
     @param use_sauter_eps If True (default), use the geometric inverse aspect ratio
       \f$\varepsilon = (R_{\max}-R_{\min})/(2\langle R\rangle)\f$ from the field-line trace.
       If False, use the formula \f$\varepsilon = \langle a\rangle / \langle R\rangle\f$.
@@ -921,6 +927,13 @@ def solve_with_bootstrap(mygs,
     @result Dictionary with total, bootstrap, inductive, and isolated edge current profiles
       (internal solver also returns `'psi_n'`, the \f$\hat{\psi}\f$ of each input node)
     '''
+
+    if psi_N is not None:
+        if x is not None:
+            raise ValueError("pass the grid as x only (psi_N is its deprecated alias)")
+        warn("solve_with_bootstrap(psi_N=) is deprecated: pass the grid as x= and its "
+             "coordinate as coord= ('psi_n' or 'phi_n')", DeprecationWarning, stacklevel=2)
+        x = psi_N
 
     if not use_python_solve:
         _python_only = {
@@ -940,12 +953,12 @@ def solve_with_bootstrap(mygs,
             )
         if inductive_jphi is None:
             raise ValueError("inductive_jphi must be provided for method='internal'")
-        _ne   = ne if isinstance(ne, dict) else _default_psi_profile(ne, 'ne', psi_N=psi_N)
-        _Te   = Te if isinstance(Te, dict) else _default_psi_profile(Te, 'Te', psi_N=psi_N, scale=1e-3)
-        _ni   = ni if isinstance(ni, dict) else _default_psi_profile(ni, 'ni', psi_N=psi_N)
-        _Ti   = Ti if isinstance(Ti, dict) else _default_psi_profile(Ti, 'Ti', psi_N=psi_N, scale=1e-3)
-        _ffp  = inductive_jphi if isinstance(inductive_jphi, dict) else _default_psi_profile(inductive_jphi, 'inductive_jphi', psi_N=psi_N)
-        Zeff_arg = Zeff if isinstance(Zeff, dict) else (_default_psi_profile(Zeff, 'Zeff', psi_N=psi_N) if numpy.ndim(Zeff) > 0 and numpy.size(Zeff) > 1 else float(Zeff))
+        _ne   = ne if isinstance(ne, dict) else _default_profile(ne, 'ne', x=x)
+        _Te   = Te if isinstance(Te, dict) else _default_profile(Te, 'Te', x=x, scale=1e-3)
+        _ni   = ni if isinstance(ni, dict) else _default_profile(ni, 'ni', x=x)
+        _Ti   = Ti if isinstance(Ti, dict) else _default_profile(Ti, 'Ti', x=x, scale=1e-3)
+        _ffp  = inductive_jphi if isinstance(inductive_jphi, dict) else _default_profile(inductive_jphi, 'inductive_jphi', x=x)
+        Zeff_arg = Zeff if isinstance(Zeff, dict) else (_default_profile(Zeff, 'Zeff', x=x) if numpy.ndim(Zeff) > 0 and numpy.size(Zeff) > 1 else float(Zeff))
         _results = mygs.solve_bootstrap(
             ffp_prof=_ffp,
             te_prof=_Te,
@@ -958,6 +971,7 @@ def solve_with_bootstrap(mygs,
             isolate_edge_jBS=isolate_edge_jBS,
             parameterize_jBS=parameterize_jBS,
             diagnose_bs=diagnose_bs,
+            coord=coord,
             **kwargs
         )
         results = {'psi_n' : _results['psi_n'],
@@ -969,8 +983,8 @@ def solve_with_bootstrap(mygs,
                     'scale_Ip' : 1.0}
         return results
     else:
-        if kwargs.get('coord', 'psi_n') != 'psi_n':
-            raise ValueError("coord='%s' requires the internal solver (use_python_solve=False)" % kwargs['coord'])
+        if coord != 'psi_n':
+            raise ValueError("coord='%s' requires the internal solver (use_python_solve=False)" % coord)
         F0_local = kwargs.get('F0_local', None)
 
     warn(
@@ -1009,9 +1023,9 @@ def solve_with_bootstrap(mygs,
     # p = n * T * k_B. Since T is in eV, k_B is essentially elementary charge e
     pressure = (EC * ne * Te) + (EC * ni * Ti) # Kinetic profiles same length
 
-    # Normalized flux grid the input profiles are sampled on; `None` means assume
-    # they are evenly sampled in psi_norm 0..1
-    psi_N = _validate_psi_grid(pressure, 'pressure', psi_N=psi_N)
+    # Normalized flux grid the input profiles are sampled on (psi_N: coord is
+    # 'psi_n' here); `None` means assume they are evenly sampled in psi_norm 0..1
+    psi_N = _validate_grid(pressure, 'pressure', x=x)
 
     # Equilibrium quantities are sampled on the *same* grid as the profiles so that
     # they can be combined element-wise below. The endpoints are clipped because the
