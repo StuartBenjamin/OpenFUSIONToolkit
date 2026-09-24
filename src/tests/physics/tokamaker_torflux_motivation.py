@@ -9,14 +9,13 @@ surfaces can shift relative to the lab frame. Quantities mapped on psi_N will th
 their original experimental reconstructions.
 
 Normalised toroidal flux (Phi_N) is much less sensitive to changes in the current profile than
-psi_N. Tokamaks employ a large toroidal field supplied by external coils (B_phi ~ F0/R), so the
-toroidal flux inside a surface is set mainly by the area it encloses: the plasma changes F by only
-a few percent (about 2% from edge to axis in the gEQDSK used here). The poloidal flux inside a
+psi_N. Tokamaks employ a large toroidal field supplied by external coils, so the
+toroidal flux inside a surface is set mainly by the area it encloses. The poloidal flux inside a
 surface, by contrast, is produced by the plasma current inside it. The two are linked by
 dPhi = q dpsi, so a new current profile changes q and the psi_N -> Phi_N map, while Phi_N stays
 tied to the geometry. If we pin flux-surface quantities to Phi_N during the re-solve, they deviate
 less in real space than quantities pinned to psi_N. They still move somewhat, because the shapes
-of the inner flux surfaces (e.g. the Shafranov shift) also depend on the current profile.
+of the inner flux surfaces also depend on the current profile.
 
 This script generates pressure_anomaly_rz.png to illustrate this point. A reference equilibrium
 with an EFIT02-like current profile is solved with both current and pressure profiles mapped on
