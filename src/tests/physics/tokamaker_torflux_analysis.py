@@ -2,10 +2,10 @@
 
 Not part of the automated tests. It regenerates the data and figures used to validate the
 toroidal-flux map and the cut-cell q/F backend on the ITER (diverted) and LTX (limited) test cases:
-  - cut-cell map against a map built from densely traced q
+  - cut-cell map against a map built from densely traced q surfaces
   - round trips: psi_N profiles rewritten on Phi_N nodes and re-solved
   - solve_bootstrap with all profiles on Phi_N
-  - cut-cell q/F against the field-line tracer (accuracy, cost, in-solve cost)
+  - comparison between the cut-cell q/F map against the field-line tracer in accuracy, cost, and in-solve cost
 
 Usage (run from this directory, ~15 min on 8 cores):
     python tokamaker_torflux_analysis.py [--out DIR] [--steps bench iter nodes ltx boot plots]
