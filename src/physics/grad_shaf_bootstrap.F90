@@ -85,7 +85,7 @@ type, extends(jphi_flux_func) :: jphi_bs_flux_func
   integer(4) :: dalpha_no_improve = 0 !< Consecutive steps with non-decreasing dalpha
   real(8) :: dalpha_min = huge(1.0d0) !< dalpha of the previous update (stall diagnostic)
   real(8), pointer, dimension(:) :: j_BS_last => NULL() !< j_BS profile from previous NL iteration (for freeze check)
-  logical :: freeze_saw = .FALSE. !< Set .TRUE. once j_saw converges or stagnates
+  logical :: freeze_saw = .FALSE. !< Set .TRUE. once j_saw converges or stagnates, after j_BS is frozen
   integer(4) :: djsaw_no_improve = 0 !< Consecutive steps with non-decreasing djsaw
   real(8) :: djsaw_min = huge(1.0d0) !< Running minimum djsaw
   real(8), pointer, dimension(:) :: j_saw_last => NULL() !< j_saw from previous NL iteration (mu0*A/m²)
@@ -691,11 +691,15 @@ END IF
 IF(do_saw)THEN
   ALLOCATE(dj_saw(0:self%npsi))
   CALL saw_redistribute(self, gseq, R_spline, xn, psi_qg, q_g, cum(:,1) + alpha*cum(:,2), &
-                        cum(:,4), cum(:,5), dj_saw)
+                        cum(:,4), cum(:,5), alpha*jphi_ind + j_BS + jphi_fixed + j_saw_in, dj_saw)
   j_saw = j_saw_in + self%boot_ops%saw_relax*dj_saw + (1.0_r8 - self%boot_ops%saw_relax)*(j_saw_cur - j_saw_in)
   jphi_total = alpha * jphi_ind + j_BS + jphi_fixed + j_saw
   djsaw = SQRT(SUM((j_saw - self%j_saw_last)**2)) / MAX(SQRT(SUM(jphi_total**2)), 1.0e-30_r8)
-  IF(djsaw < self%boot_ops%saw_tol)THEN
+  ! Freeze only once j_BS has: before that the base current still moves, and an early iterate
+  ! without a dip (djsaw = 0) would freeze the reset off for the whole solve
+  IF(.NOT.self%freeze_j_BS)THEN
+    CONTINUE
+  ELSE IF(djsaw < self%boot_ops%saw_tol)THEN
     self%freeze_saw = .TRUE.
     IF(oft_env%pm)WRITE(*,*)' Freezing sawtooth current.'
   ELSE IF(djsaw >= self%djsaw_min)THEN
@@ -802,9 +806,11 @@ END SUBROUTINE jphi_bs_update
 !! (q*I is geometric). rho = sqrt(Phi_N), Phi from int q_eq dpsi. @ref saw_reset_1d gives the
 !! reset on the nodes whose cumulative-area bin holds at least a quarter of the mean bin area (a
 !! node-dense axis, e.g. psi_N ~ rho^2, leaves inner bins without quadrature points), interpolated
-!! in rho to every node; dI/dA is mapped back to jphi with the linear part of eval_jtor_imas.
+!! in rho; inside rho_m the base jphi between kept nodes is replaced by its interpolant too (w-weighted),
+!! so its fine structure is reset with the rest. dI/dA is mapped back to jphi with the linear part of
+!! eval_jtor_imas.
 !---------------------------------------------------------------------------------
-SUBROUTINE saw_redistribute(self, gseq, R_spline, xn, psi_qg, q_g, I_base, I_eq, area, dj)
+SUBROUTINE saw_redistribute(self, gseq, R_spline, xn, psi_qg, q_g, I_base, I_eq, area, j_base, dj)
 CLASS(jphi_bs_flux_func), INTENT(inout) :: self
 CLASS(gs_equil), INTENT(inout) :: gseq
 TYPE(spline_type), INTENT(inout) :: R_spline
@@ -814,6 +820,7 @@ REAL(r8), INTENT(in) :: q_g(:) !< q on psi_qg [ngeom]
 REAL(r8), INTENT(in) :: I_base(:) !< Enclosed base current at each node (gs_flux_cumint) [n]
 REAL(r8), INTENT(in) :: I_eq(:) !< Enclosed current of the traced equilibrium [n]
 REAL(r8), INTENT(in) :: area(:) !< Enclosed area [n]
+REAL(r8), INTENT(in) :: j_base(:) !< Base jphi on the nodes [n]
 REAL(r8), INTENT(out) :: dj(:) !< Reset current [n]
 INTEGER(i4) :: n, i, k, n_dips, ng, nk
 INTEGER(i4), ALLOCATABLE :: kk(:)
@@ -872,8 +879,14 @@ END DO
 CALL saw_reset_1d(nk, rho(kk(1:nk)), qb(1:nk), Ib(kk(1:nk)), Ar(kk(1:nk)), c1(kk(1:nk)), &
                   self%boot_ops%saw_q_s, self%boot_ops%saw_dq, self%boot_ops%saw_ramp, &
                   self%boot_ops%saw_rule, qn(1:nk), djr(1:nk), rho_s, rho_m, n_dips, w)
+!---Reset interpolated in rho; inside rho_m the base structure between kept nodes is reset too
+!   (target total = base + reset is interpolated), weighted by w so it vanishes with the reset
+DO i = 1, nk
+  phi(i) = j_base(n+1-kk(i))
+END DO
 DO i = 1, n
   dj(n + 1 - i) = linterp(rho(kk(1:nk)), djr(1:nk), nk, rho(i), 1)
+  IF(rho(i) < rho_m)dj(n + 1 - i) = dj(n + 1 - i) + w*(linterp(rho(kk(1:nk)), phi(1:nk), nk, rho(i), 1) - j_base(n+1-i))
 END DO
 IF(.NOT.ALL(ABS(dj) < HUGE(1.0_r8)))THEN
   CALL oft_warn('saw_redistribute: non-finite reset current, skipping the reset this update')
