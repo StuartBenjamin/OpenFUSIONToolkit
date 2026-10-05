@@ -84,7 +84,7 @@ type, extends(jphi_flux_func) :: jphi_bs_flux_func
   integer(4) :: dalpha_no_improve = 0 !< Consecutive steps with non-decreasing dalpha
   real(8) :: dalpha_min = huge(1.0d0) !< dalpha of the previous update (stall diagnostic)
   real(8), pointer, dimension(:) :: j_BS_last => NULL() !< j_BS profile from previous NL iteration (for freeze check)
-  logical :: freeze_saw = .FALSE. !< Set .TRUE. once j_saw converges or stagnates
+  logical :: freeze_saw = .FALSE. !< Set .TRUE. once j_saw converges or stagnates, after j_BS is frozen
   integer(4) :: djsaw_no_improve = 0 !< Consecutive steps with non-decreasing djsaw
   real(8) :: djsaw_min = huge(1.0d0) !< Running minimum djsaw
   real(8), pointer, dimension(:) :: j_saw_last => NULL() !< j_saw from previous NL iteration (mu0*A/m²)
@@ -685,7 +685,11 @@ IF(do_saw)THEN
   j_saw = j_saw_in + self%boot_ops%saw_relax*dj_saw + (1.0_r8 - self%boot_ops%saw_relax)*(j_saw_cur - j_saw_in)
   jphi_total = alpha * jphi_ind + j_BS + jphi_fixed + j_saw
   djsaw = SQRT(SUM((j_saw - self%j_saw_last)**2)) / MAX(SQRT(SUM(jphi_total**2)), 1.0e-30_r8)
-  IF(djsaw < self%boot_ops%saw_tol)THEN
+  ! Freeze only once j_BS has: before that the base current still moves, and an early iterate
+  ! without a dip (djsaw = 0) would freeze the reset off for the whole solve
+  IF(.NOT.self%freeze_j_BS)THEN
+    CONTINUE
+  ELSE IF(djsaw < self%boot_ops%saw_tol)THEN
     self%freeze_saw = .TRUE.
     IF(oft_env%pm)WRITE(*,*)' Freezing sawtooth current.'
   ELSE IF(djsaw >= self%djsaw_min)THEN

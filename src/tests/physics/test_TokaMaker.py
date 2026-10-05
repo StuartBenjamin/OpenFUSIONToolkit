@@ -2025,6 +2025,12 @@ def run_ITER_bootstrap_saw_internal(mesh_resolution, fe_order, mp_q):
         outside = rho_of_psi > p_on['saw_rho_m'] + 0.05
         if np.max(np.abs(p_on['j_saw'][outside])) > 1e-3*np.max(np.abs(p_on['j_saw'])):
             raise AssertionError("saw: j_saw nonzero outside the mixing radius")
+        # (b2) a second solve from the converged reset state must reset again (an early iterate with
+        #      no dip must not freeze the reset off)
+        mygs.solve_bootstrap(saw_q_s=q_s, saw_dq=dq, **common)
+        _, q_on2, _, _, _, _ = mygs.get_q(npsi=40)
+        if abs(q_on2[0] - q_s) > 0.03:
+            raise AssertionError(f"saw: repeated solve q0 {q_on2[0]:.4f} not at q_s {q_s:.4f}")
         # (e) node-dense axis (psi_N = rho^2, as on a FUSE core_profiles grid): inner cumulative-area
         #     bins hold no quadrature points; the reset must stay finite and still reach q_s
         x2 = np.linspace(0.0, 1.0, n_sample)**2
