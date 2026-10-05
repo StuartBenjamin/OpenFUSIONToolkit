@@ -816,15 +816,24 @@ REAL(r8), INTENT(in) :: I_base(:) !< Enclosed base current at each node (gs_flux
 REAL(r8), INTENT(in) :: I_eq(:) !< Enclosed current of the traced equilibrium [n]
 REAL(r8), INTENT(in) :: area(:) !< Enclosed area [n]
 REAL(r8), INTENT(out) :: dj(:) !< Reset current [n]
-INTEGER(i4) :: n, i, k, n_dips
+INTEGER(i4) :: n, i, k, n_dips, ng
 REAL(r8) :: rho_s, rho_m, w
 REAL(r8), ALLOCATABLE :: q_eq(:), c1(:), rho(:), qb(:), Ib(:), Ar(:), qn(:), djr(:), r(:), phi(:)
+TYPE(spline_type) :: q_spl
 n = SIZE(xn)
 ALLOCATE(q_eq(n), c1(n), rho(n), qb(n), Ib(n), Ar(n), qn(n), djr(n), r(n), phi(n))
+!---Cubic spline of q on the traced surfaces (LCFS point dropped), constant beyond them: linear
+!   interpolation put kinks in q_base that dI/dA turned into grid-scale wiggles in j_saw
+ng = SIZE(psi_qg)
+CALL spline_alloc(q_spl, ng-2, 1)
+q_spl%xs(0:ng-2) = psi_qg(2:ng)
+q_spl%fs(0:ng-2,1) = ABS(q_g(2:ng))
+CALL spline_fit(q_spl, "extrap")
 !---Flip to axis-first order (index 1 = innermost node)
 DO i = 1, n
   k = n + 1 - i
-  q_eq(i) = linterp(psi_qg, ABS(q_g), SIZE(psi_qg), xn(k), 1)
+  CALL spline_eval(q_spl, MIN(MAX(xn(k), psi_qg(2)), psi_qg(ng)), 0)
+  q_eq(i) = q_spl%f(1)
   CALL spline_eval(R_spline, xn(k), 0)
   c1(i) = R_spline%f(3)/R_spline%f(2)**2
   Ib(i) = I_base(k)
@@ -851,6 +860,7 @@ IF(self%boot_ops%diagnose_bs)THEN
   WRITE(*,'(A,2F8.4,I3,F7.3,2F8.4)') '  [saw] rho_s rho_m n_dips w q_base(0) q_new(0) = ', &
     rho_s, rho_m, n_dips, w, qb(1), qn(1)
 END IF
+CALL spline_dealloc(q_spl)
 DEALLOCATE(q_eq, c1, rho, qb, Ib, Ar, qn, djr, r, phi)
 END SUBROUTINE saw_redistribute
 !---------------------------------------------------------------------------------
