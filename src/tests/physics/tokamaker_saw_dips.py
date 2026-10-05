@@ -33,48 +33,98 @@ def pshape(x, m):
 
 
 def local_ref(r, q, q_s=Q_S, dq=DQ, ramp=RAMP):
-    '''NumPy reference of rule 2 (local); returns q_new and the regions (rho_in, rho_c, rho_out, w, q_min)'''
+    '''NumPy reference of rule 2 (local, hump blend); returns q_new and the regions
+    (rho_in, rho_c, rho_out, w, q_min, humps [(rho_h, h, s)])'''
     n, qm = len(q), q_s + dq
     gq = grad_nonuniform(r, q)
+    weight = lambda a, b: min(max((q_s - q[a:b+1].min())/ramp, 0.0), 1.0) if ramp > 0 else 1.0
+    def centre(a, b, lo, hi):
+        ic = a + int(np.argmin(q[a:b+1]))
+        if ic == 0: return 0.0
+        d0, d2 = r[ic-1] - r[ic], r[ic+1] - r[ic]
+        s0, s2 = (q[ic-1] - q[ic])/d0, (q[ic+1] - q[ic])/d2
+        cc = (s2 - s0)/(d2 - d0)
+        rc = r[ic] - 0.5*(s0 - cc*d0)/cc if cc > 0 else r[ic]
+        return min(max(rc, lo), hi)
+    def hump(i):
+        d0, d2 = r[i-1] - r[i], r[i+1] - r[i]
+        s0, s2 = (q[i-1] - q[i])/d0, (q[i+1] - q[i])/d2
+        cc = (s2 - s0)/(d2 - d0)
+        if cc >= 0: return r[i], q[i]
+        bb = s0 - cc*d0
+        t = min(max(-0.5*bb/cc, d0), d2)
+        return r[i] + t, max(q[i] + bb*t + cc*t**2, q[i])
+    def target(x, r_in, d_in, s_in, r_c, r_out, d_out, s_out):
+        if x >= r_c:
+            if d_out > 0 and r_out > r_c:
+                return q_s + d_out*pshape((x - r_c)/(r_out - r_c), max((r_out - r_c)*s_out/d_out, 0.0))
+            return q_s
+        if d_in > 0:
+            return q_s + d_in*pshape((r_c - x)/(r_c - r_in), max(-(r_c - r_in)*s_in/d_in, 0.0))
+        return q_s
     q_new, regions, ia = q.copy(), [], None
     for k in range(n):
-        if q[k] >= qm:
-            continue
+        if q[k] >= qm: continue
         ia = k if ia is None else ia
-        if k == n - 1:
-            break
-        if q[k+1] < qm:
-            continue
+        if k == n - 1: break
+        if q[k+1] < qm: continue
         ib = k
         if q[ia:ib+1].min() < q_s:
-            ic = ia + int(np.argmin(q[ia:ib+1]))
             r_out = r[ib] + (qm - q[ib])/(q[ib+1] - q[ib])*(r[ib+1] - r[ib])
             s_out = gq[ib] + (r_out - r[ib])/(r[ib+1] - r[ib])*(gq[ib+1] - gq[ib])
-            if ia == 0:
-                r_in, d_in, s_in = 0.0, max(q[0] - q_s, 0.0), 0.0
+            if ia == 0: r_in, d_in, s_in = 0.0, max(q[0] - q_s, 0.0), 0.0
             else:
                 r_in = r[ia-1] + (qm - q[ia-1])/(q[ia] - q[ia-1])*(r[ia] - r[ia-1])
-                s_in = gq[ia-1] + (r_in - r[ia-1])/(r[ia] - r[ia-1])*(gq[ia] - gq[ia-1])
-                d_in = dq
-            r_c = 0.0
-            if ic > 0:
-                d0, d2 = r[ic-1] - r[ic], r[ic+1] - r[ic]
-                s0, s2 = (q[ic-1] - q[ic])/d0, (q[ic+1] - q[ic])/d2
-                cc = (s2 - s0)/(d2 - d0)
-                r_c = r[ic] - 0.5*(s0 - cc*d0)/cc if cc > 0 else r[ic]
-                r_c = min(max(r_c, r_in), r_out)
-            m_out = max((r_out - r_c)*s_out/dq, 0.0)
-            m_in = max(-(r_c - r_in)*s_in/d_in, 0.0) if d_in > 0 else 0.0
-            wk = min(max((q_s - q[ia:ib+1].min())/ramp, 0.0), 1.0) if ramp > 0 else 1.0
+                s_in = gq[ia-1] + (r_in - r[ia-1])/(r[ia] - r[ia-1])*(gq[ia] - gq[ia-1]); d_in = dq
+            r_c, wk = centre(ia, ib, r_in, r_out), weight(ia, ib)
+            low = np.flatnonzero(q[ia:ib+1] < q_s) + ia
+            runs = np.split(low, np.flatnonzero(np.diff(low) > 1) + 1)
+            # segments: ('free',) or ('run', j); humps between consecutive segments: (rho_h, h, s)
+            segs, humps = [], []
+            # left edge hump: interior local max between region start and run 0
+            a0 = runs[0][0]
+            if a0 > ia:
+                lm = [i for i in range(max(ia, 1), a0) if q[i] >= q[i-1] and q[i] >= q[i+1]]
+                if lm:
+                    ih = max(lm, key=lambda i: q[i])
+                    rh, h = hump(ih)
+                    b = max(q_s, q[ia:ih+1].min())
+                    s = min(max((h - b)/(qm - b), 0.0), 1.0) if qm > b else 0.0
+                    segs.append(('free',)); humps.append((rh, h, s))
+            for j in range(len(runs)):
+                segs.append(('run', j))
+                if j < len(runs) - 1:
+                    i = runs[j][-1] + 1 + int(np.argmax(q[runs[j][-1]+1:runs[j+1][0]]))
+                    rh, h = hump(i)
+                    humps.append((rh, h, min(max((h - q_s)/dq, 0.0), 1.0)))
+            ze = runs[-1][-1]
+            if ze < ib:
+                lm = [i for i in range(ze + 1, ib + 1) if q[i] >= q[i-1] and q[i] >= q[i+1]]
+                if lm:
+                    ih = max(lm, key=lambda i: q[i])
+                    rh, h = hump(ih)
+                    b = max(q_s, q[ih:ib+1].min())
+                    s = min(max((h - b)/(qm - b), 0.0), 1.0) if qm > b else 0.0
+                    segs.append(('free',)); humps.append((rh, h, s))
+            ends = [r_in] + [h[0] for h in humps] + [r_out]
+            hts = [None] + [max(h[1] - q_s, 0.0) for h in humps] + [None]
             for kk in range(ia, ib + 1):
-                if r[kk] >= r_c:
-                    qt = q_s + dq*pshape((r[kk] - r_c)/(r_out - r_c), m_out)
-                elif d_in > 0:
-                    qt = q_s + d_in*pshape((r_c - r[kk])/(r_c - r_in), m_in)
+                qt = target(r[kk], r_in, d_in, s_in, r_c, r_out, dq, s_out)
+                if not humps:
+                    q_new[kk] = q[kk] + wk*(qt - q[kk]); continue
+                m = int(np.sum(np.array(ends[1:-1]) <= r[kk]))
+                sk = float(np.interp(r[kk], [h[0] for h in humps], [h[2] for h in humps]))
+                if segs[m][0] == 'free':
+                    qsp, wj = q[kk], 0.0
                 else:
-                    qt = q_s
-                q_new[kk] = q[kk] + wk*(qt - q[kk])
-            regions.append(dict(rho_in=r_in, rho_c=r_c, rho_out=r_out, w=wk, q_min=float(q[ia:ib+1].min())))
+                    j = segs[m][1]
+                    dl = d_in if m == 0 else hts[m]; sl = s_in if m == 0 else 0.0
+                    dr = dq if m == len(segs) - 1 else hts[m+1]; sr = s_out if m == len(segs) - 1 else 0.0
+                    rcj = centre(runs[j][0], runs[j][-1], ends[m], ends[m+1])
+                    qsp, wj = target(r[kk], ends[m], dl, sl, rcj, ends[m+1], dr, sr), weight(runs[j][0], runs[j][-1])
+                q_new[kk] = q[kk] + (1 - sk)*wk*(qt - q[kk]) + sk*wj*(qsp - q[kk])
+            regions.append(dict(rho_in=r_in, rho_c=r_c, rho_out=r_out, w=wk, q_min=float(q[ia:ib+1].min()),
+                                humps=[dict(rho_h=float(h[0]), h=float(h[1]), s=float(h[2])) for h in humps]))
         ia = None
     return q_new, regions
 
@@ -160,6 +210,8 @@ SWEEPS = {
     'hump_through_qm_outer_deeper': (lambda h: 1.01 + 0.4*rho**2 - 0.02*g(0.0, 0.08) - 0.12*g(0.4, 0.06) + h*g(0.2, 0.06),
                                      np.linspace(-0.01, 0.06, 141), lambda h, q: q[(rho > 0.1) & (rho < 0.3)].max() - QM,
                                      'hump max - (q_s + dq)', 0.0),
+    'hump_through_qm_split': (lambda a: 0.995 + a*g(0.3, 0.06) + 0.6*rho**6, np.linspace(0.035, 0.075, 161),
+                              lambda a, q: q[(rho > 0.2) & (rho < 0.4)].max() - QM, 'hump max - (q_s + dq)', 0.0),
     'equal_minima_swap': (lambda d2: 1.04 + 0.1*rho**2 - 0.06*g(0.15, 0.05) - d2*g(0.4, 0.05),
                           np.linspace(0.064, 0.084, 101), lambda d2, q: q[rho < 0.27].min() - q[rho > 0.27].min(),
                           'min q_inner - min q_outer', 0.0),

@@ -2128,11 +2128,22 @@ def test_saw_reset_1d():
     assert np.all(dj_l[~near] == 0.0)
     assert abs(np.trapezoid(dj_l, A)) < 5e-3*np.trapezoid(np.abs(dj_l), A)
     assert np.isclose(out[1][0][0], q_s) and out[1][2]['rho_m'] == sc_l['rho_m'] and sc_l['rho_m'] > sc_l['rho_out'] - 1e-12
-    # Two dips with the hump between them below q_s + dq: one region, reset about the deeper (axis) dip
+    # Two dips with the hump between them below q_s + dq: one region, q >= q_s across it, the hump
+    # partly kept (merged reset blended toward the split one by the hump height)
     q2 = 1.035 + 0.12*rho**2 - 0.12*g(0.0, 0.08) - 0.05*g(0.4, 0.06)
     q_l, dj_l, sc_l = reset(q2, 2)
     assert sc_l['n_dips'] == 1 and sc_l['rho_out'] > 0.45 and np.isclose(q_l[0], q_s)
-    assert np.all(np.diff(q_l[rho < sc_l['rho_out']]) >= -1e-12)
+    assert np.all(q_l[rho < sc_l['rho_out']] >= q_s - 1e-12)
+    assert np.all(q_l[rho >= sc_l['rho_out']] == q2[rho >= sc_l['rho_out']])
+    # Hump height through q_s + dq: the merged region splits in two. Unblended, q_new jumps by dq there;
+    # blended, only the parabola-vs-node hump-top mismatch remains (~1 % of dq), and q_new >= q_s
+    qh = lambda a: reset(0.995 + a*g(0.3, 0.06) + 0.6*rho**6, 2)
+    lo, hi = 0.035, 0.075
+    assert qh(lo)[2]['n_dips'] == 1 and qh(hi)[2]['n_dips'] == 2
+    for _ in range(50):
+        lo, hi = ((lo + hi)/2, hi) if qh((lo + hi)/2)[2]['n_dips'] == 1 else (lo, (lo + hi)/2)
+    assert np.abs(qh(hi)[0] - qh(lo)[0]).max() < 0.05*dq
+    assert all(np.all(r[0][rho < r[2]['rho_out']] >= q_s - 1e-12) for r in map(qh, np.linspace(0.035, 0.075, 41)))
     # Hump above q_s + dq: two regions, the hump between them untouched
     q3 = 1.06 + 0.6*rho**2 - 0.12*g(0.0, 0.1) - 0.12*g(0.35, 0.06)
     out = {r: reset(q3, r) for r in (1, 2)}
