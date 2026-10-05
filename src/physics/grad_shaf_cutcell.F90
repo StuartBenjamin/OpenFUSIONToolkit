@@ -56,7 +56,7 @@ REAL(r8), PARAMETER :: wg5(5) = [0.236926885056189087514264d0,0.4786286704993664
 TYPE(oft_scalar_bfem), POINTER :: perm_rep => NULL()
 INTEGER(i8) :: perm_sum = -1
 INTEGER(i4), ALLOCATABLE :: perm(:,:)
-PUBLIC gs_qgeom_cutcell
+PUBLIC gs_qgeom_cutcell, gs_sauter_cutcell
 CONTAINS
 !------------------------------------------------------------------------------
 !> Geometric factor \f$ g = q/F = \frac{1}{2\pi} \oint \frac{dl}{R |\nabla \psi|} \f$ on flux surfaces
@@ -125,9 +125,73 @@ END DO
 DEALLOCATE(vals,gblk,wblk,wind)
 end subroutine gs_qgeom_cutcell
 !------------------------------------------------------------------------------
-!> Add arc integrals and winding of all surfaces crossing `cell`
+!> Flux-surface sums for @ref grad_shaf_bootstrap::sauter_fc by the same quadrature
+!!
+!! `acc(:,i)` holds \f$ \oint w\,[R, R^2, 1, R a, R|B|, R B^2, 1/R, R f(|B|/B_{ref})] \f$ with
+!! \f$ w = dl/|\nabla \hat{\psi}| \f$, \f$ a \f$ the distance to the O-point and
+!! \f$ f(b)=(1-\sqrt{1-b}(1+b/2))/b^2 \f$. Extrema are sampled at arc ends and Gauss points
+!! and refined by a parabola on each arc. Results do not depend on the thread count.
 !------------------------------------------------------------------------------
-subroutine cell_contrib(gseq,bt,vals,x1,dpsi,nr,psi_q,cell,gloc,wloc)
+subroutine gs_sauter_cutcell(gseq,nr,psi_q,fpol,bref,acc,ext,ok)
+class(gs_equil), intent(inout) :: gseq !< G-S object
+integer(i4), intent(in) :: nr !< Number of surfaces
+real(r8), intent(in) :: psi_q(nr) !< Surface locations (0 at LCFS, 1 at axis)
+real(r8), intent(in) :: fpol(nr) !< F on each surface
+real(r8), intent(in) :: bref(nr) !< \f$ B_{ref} \f$ for the last sum (skipped if <=0)
+real(r8), intent(out) :: acc(8,nr) !< Surface sums
+real(r8), intent(out) :: ext(3,nr) !< \f$ B_{max} \f$, \f$ R_{max} \f$, \f$ -R_{min} \f$
+logical, intent(out) :: ok(nr) !< Surface inside (0,1) and closed about the O-point
+type(bern_tab) :: bt
+real(r8), pointer :: vals(:)
+real(r8), allocatable :: ablk(:,:,:),wblk(:,:),gloc(:),wloc(:),aloc(:,:),eloc(:,:),wind(:)
+real(r8) :: x1,dpsi
+integer(i4) :: nblk,ib,cell,i,nc
+acc=0.d0; ext=-HUGE(1.d0); ok=.FALSE.
+IF(nr<1)RETURN
+IF(gseq%plasma_bounds(1)<-1.d98)RETURN
+x1=gseq%plasma_bounds(1)
+dpsi=gseq%plasma_bounds(2)-gseq%plasma_bounds(1)
+IF(dpsi==0.d0)RETURN
+CALL bern_setup(bt,gseq%device%fe_rep%order)
+NULLIFY(vals)
+CALL gseq%psi%get_local(vals)
+nc=gseq%device%fe_rep%mesh%nc
+CALL perm_update(gseq%device%fe_rep,bt)
+nblk=(nc+nblk_cells-1)/nblk_cells
+ALLOCATE(ablk(8,nr,nblk),wblk(nr,nblk))
+!$omp parallel private(ib,cell,gloc,wloc,aloc,eloc)
+ALLOCATE(gloc(nr),wloc(nr),aloc(8,nr),eloc(3,nr))
+eloc=-HUGE(1.d0)
+!$omp do schedule(dynamic,1)
+DO ib=1,nblk
+  gloc=0.d0; wloc=0.d0; aloc=0.d0
+  DO cell=(ib-1)*nblk_cells+1,MIN(ib*nblk_cells,nc)
+    IF(gseq%device%fe_rep%mesh%reg(cell)/=1)CYCLE
+    CALL cell_contrib(gseq,bt,vals,x1,dpsi,nr,psi_q,cell,gloc,wloc,fpol,bref,aloc,eloc)
+  END DO
+  ablk(:,:,ib)=aloc; wblk(:,ib)=wloc
+END DO
+!$omp end do
+!$omp critical
+ext=MAX(ext,eloc)
+!$omp end critical
+DEALLOCATE(gloc,wloc,aloc,eloc)
+!$omp end parallel
+ALLOCATE(wind(nr))
+wind=0.d0
+DO ib=1,nblk
+  acc=acc+ablk(:,:,ib)
+  wind=wind+wblk(:,ib)
+END DO
+DO i=1,nr
+  ok(i)=(psi_q(i)>0.d0).AND.(psi_q(i)<1.d0).AND.(ABS(wind(i)-1.d0)<=wind_tol)
+END DO
+DEALLOCATE(vals,ablk,wblk,wind)
+end subroutine gs_sauter_cutcell
+!------------------------------------------------------------------------------
+!> Add arc integrals and winding (and optionally Sauter sums) of all surfaces crossing `cell`
+!------------------------------------------------------------------------------
+subroutine cell_contrib(gseq,bt,vals,x1,dpsi,nr,psi_q,cell,gloc,wloc,fpol,bref,aloc,eloc)
 class(gs_equil), intent(inout) :: gseq !< G-S object
 type(bern_tab), intent(in) :: bt !< Bernstein tables
 real(r8), intent(in) :: vals(:) !< Local \f$ \psi \f$ values
@@ -138,6 +202,10 @@ real(r8), intent(in) :: psi_q(nr) !< Surface locations
 integer(i4), intent(in) :: cell !< Cell index
 real(r8), intent(inout) :: gloc(nr) !< Accumulated \f$ \oint dl/(R|\nabla\hat{\psi}|) \f$
 real(r8), intent(inout) :: wloc(nr) !< Accumulated winding number
+real(r8), optional, intent(in) :: fpol(nr) !< F on each surface (Sauter sums only)
+real(r8), optional, intent(in) :: bref(nr) !< \f$ B_{ref} \f$ on each surface (Sauter sums only)
+real(r8), optional, intent(inout) :: aloc(:,:) !< Accumulated Sauter sums [8,nr] (see @ref gs_sauter_cutcell)
+real(r8), optional, intent(inout) :: eloc(:,:) !< Accumulated extrema [3,nr]
 type(oft_scalar_bfem), pointer :: lag_rep
 integer(i4) :: jdofs(32),jc,k,ns,d0,i
 integer(i4) :: dep(3*max_depth+4)
@@ -186,7 +254,7 @@ DO WHILE(ns>0)
     DO i=1,nr
       IF(.NOT.act(i))CYCLE
       IF((d0<max_depth).AND.(.NOT.edges_ok(psi_q(i))))CYCLE
-      CALL tri_arc(psi_q(i),gloc(i),wloc(i))
+      CALL tri_arc(psi_q(i),gloc(i),wloc(i),i)
       act(i)=.FALSE.
     END DO
   END IF
@@ -231,13 +299,15 @@ END DO
 edges_ok=.TRUE.
 end function edges_ok
 !---Integrate the arc of surface s in the current (simple) sub-cell
-subroutine tri_arc(s,gacc,wacc)
+subroutine tri_arc(s,gacc,wacc,iq)
 real(r8), intent(in) :: s
 real(r8), intent(inout) :: gacc,wacc
+integer(i4), intent(in) :: iq
 integer(i4) :: k0,k1,k2,ig,kk,nab,ng
 logical :: ab(3)
 real(r8) :: p1(2),p2(2),e(2),xi1,xi2,xi,c(2),muc(3),elo,ehi,eta,x(2),val,gr(2)
 real(r8) :: pt(2),detm,sum,q1(2),q2(2),dth,sig,gmid(2),xg(5),wg(5)
+real(r8) :: av(8),wq,bq,b,rq,sx(0:6),sb(0:6),sr(0:6)
 DO kk=1,3
   ab(kk)=(cs(bt%corner(kk))>=s)
 END DO
@@ -258,10 +328,15 @@ xi1=DOT_PRODUCT(e,p1); xi2=DOT_PRODUCT(e,p2)
 IF(xi1==xi2)RETURN
 !---Gauss quadrature over xi, projecting onto the level set along d
 sum=0.d0
+av=0.d0
 IF(dratio>=smooth_ratio)THEN
   ng=3; xg(1:3)=xg3; wg(1:3)=wg3
 ELSE
   ng=5; xg=xg5; wg=wg5
+END IF
+IF(PRESENT(aloc))THEN
+  CALL sau_point(p1,iq,sb(0),sr(0)); sx(0)=xi1
+  CALL sau_point(p2,iq,sb(ng+1),sr(ng+1)); sx(ng+1)=xi2
 END IF
 DO ig=1,ng
   xi=(xi1+xi2)/2.d0+xg(ig)*(xi2-xi1)/2.d0
@@ -283,8 +358,30 @@ DO ig=1,ng
   CALL cell_geom(x,pt,detm)
   sum=sum+wg(ig)*ABS(detm)/(pt(1)*ABS(DOT_PRODUCT(gr,dvec)))
   IF(ig==(ng+1)/2)gmid=gr
+  IF(PRESENT(aloc))THEN
+    wq=wg(ig)*ABS(detm)/ABS(DOT_PRODUCT(gr,dvec))
+    CALL sau_point(x,iq,bq,rq,gr)
+    sx(ig)=xi; sb(ig)=bq; sr(ig)=rq
+    av(1)=av(1)+wq*pt(1)
+    av(2)=av(2)+wq*pt(1)**2
+    av(3)=av(3)+wq
+    av(4)=av(4)+wq*pt(1)*SQRT((pt(1)-gseq%o_point(1))**2+(pt(2)-gseq%o_point(2))**2)
+    av(5)=av(5)+wq*pt(1)*bq
+    av(6)=av(6)+wq*pt(1)*bq**2
+    av(7)=av(7)+wq/pt(1)
+    IF(bref(iq)>0.d0)THEN
+      b=MIN(1.d0,bq/bref(iq))
+      av(8)=av(8)+wq*pt(1)*(1.d0-SQRT(1.d0-b)*(1.d0+b/2.d0))/b**2
+    END IF
+  END IF
 END DO
 gacc=gacc+sum*ABS(xi2-xi1)/2.d0
+IF(PRESENT(aloc))THEN
+  aloc(:,iq)=aloc(:,iq)+av*ABS(xi2-xi1)/2.d0
+  eloc(1,iq)=MAX(eloc(1,iq),arc_peak(ng,sx,sb))
+  eloc(2,iq)=MAX(eloc(2,iq),arc_peak(ng,sx,sr))
+  eloc(3,iq)=MAX(eloc(3,iq),arc_peak(ng,sx,-sr))
+END IF
 !---Winding about O-point, oriented with 1-psi-hat increasing to the left
 CALL cell_geom(p1,q1,detm)
 CALL cell_geom(p2,q2,detm)
@@ -293,6 +390,25 @@ dth=ATAN2(q1(1)*q2(2)-q1(2)*q2(1),DOT_PRODUCT(q1,q2))
 sig=SIGN(1.d0,(p2(1)-p1(1))*gmid(2)-(p2(2)-p1(2))*gmid(1))*SIGN(1.d0,detm)
 wacc=wacc+sig*dth/(2.d0*pi)
 end subroutine tri_arc
+!---|B| and R at uv on surface iq
+subroutine sau_point(uv,iq,bq,rq,grin)
+real(r8), intent(in) :: uv(2)
+integer(i4), intent(in) :: iq
+real(r8), intent(out) :: bq,rq
+real(r8), optional, intent(in) :: grin(2)
+real(r8) :: lam(3),gop(3,3),dj,p3(3),grp(2),vv,gp(2)
+IF(PRESENT(grin))THEN
+  grp=grin
+ELSE
+  CALL poly_eval(bt,cm,uv,vv,grp)
+END IF
+lam=[1.d0-uv(1)-uv(2),uv(1),uv(2)]
+CALL gseq%device%fe_rep%mesh%jacobian(cell,lam,gop,dj)
+p3=gseq%device%fe_rep%mesh%log2phys(cell,lam)
+gp=grp(1)*gop(1:2,2)+grp(2)*gop(1:2,3)
+bq=SQRT(dpsi**2*SUM(gp**2)+fpol(iq)**2)/p3(1)
+rq=p3(1)
+end subroutine sau_point
 !---Crossing of surface s on sub-cell edge ka->kb (regula falsi start)
 function edge_cross(s,ka,kb) result(pc)
 real(r8), intent(in) :: s
@@ -318,6 +434,24 @@ ELSE
 END IF
 end subroutine cell_geom
 end subroutine cell_contrib
+!------------------------------------------------------------------------------
+!> Maximum of arc samples y(0:ng+1) at x(0:ng+1), refined by a parabola through the
+!! largest interior sample and its neighbours
+!------------------------------------------------------------------------------
+pure real(r8) function arc_peak(ng,x,y)
+integer(i4), intent(in) :: ng
+real(r8), intent(in) :: x(0:),y(0:)
+real(r8) :: d1,d2,a,b
+integer(i4) :: k
+k=MAXLOC(y(0:ng+1),DIM=1)-1
+arc_peak=y(k)
+IF((k<1).OR.(k>ng))RETURN
+d1=(y(k)-y(k-1))/(x(k)-x(k-1)); d2=(y(k+1)-y(k))/(x(k+1)-x(k))
+a=(d2-d1)/(x(k+1)-x(k-1))
+IF(a>=0.d0)RETURN
+b=d1+a*(x(k)-x(k-1)) ! slope at x(k)
+arc_peak=MAX(y(k),y(k)-b**2/(4.d0*a))
+end function arc_peak
 !------------------------------------------------------------------------------
 !> Root of \f$ (1-\hat{\psi})(x_0+t\,d)=s \f$ for \f$ t \in [a,b] \f$
 !!

@@ -14,7 +14,8 @@
 module grad_shaf_bootstrap
 use oft_base
 use oft_gs, only: gs_equil, flux_func, gsinv_interp, gs_factory, gs_psi2r, &
- gs_itor_nl, flux_coord_name, qprof_trace_tol
+ gs_itor_nl, flux_coord_name, qprof_trace_tol, torflux_qgeom_backend
+use oft_gs_cutcell, only: gs_sauter_cutcell
 use oft_lag_basis, only: oft_blag_geval
 use oft_mesh_type, only: bmesh_findcell
 use oft_blag_operators, only: oft_lag_brinterp
@@ -118,7 +119,7 @@ TYPE :: edge_jbs_fit_ctx
   REAL(r8) :: ub(7) = 1.0_r8        !< Upper bounds for the 7 parameters
 END TYPE edge_jbs_fit_ctx
 TYPE(edge_jbs_fit_ctx) :: active_edge_jbs !< Module-level context for lmdif callback
-REAL(r8) :: sauter_wtime = 0.d0 !< Tracing time of the last @ref sauter_fc call [s], summed over threads
+REAL(r8) :: sauter_wtime = 0.d0 !< Time of the last @ref sauter_fc call [s] (cut-cell wall time plus tracing time summed over threads)
 contains
 !------------------------------------------------------------------------------
 !> Needs Docs
@@ -637,7 +638,7 @@ wt(4)=omp_get_wtime()-wt(5)
 IF(self%boot_ops%diagnose_bs)THEN
   WRITE(*,'(A,L1,4(A,F9.4))') '  [bs_timing] bs_frozen=', wt(2)==0.d0, ' ravg=', wt(1), &
     ' bootstrap=', wt(2), ' alpha=', wt(3), ' update=', wt(4)
-  IF(wt(2)>0.d0)WRITE(*,'(A,F9.4)') '  [bs_timing] sauter_fc trace time (summed over threads)=', sauter_wtime
+  IF(wt(2)>0.d0)WRITE(*,'(A,F9.4)') '  [bs_timing] sauter_fc time=', sauter_wtime
   WRITE(*,'(A,ES12.4)') '  [jphi_bs_update] ip_target   = ', ip_target
   WRITE(*,'(A,ES12.4)') '  [jphi_bs_update] ip_result_lo= ', ip_result_lo
   WRITE(*,'(A,ES12.4)') '  [jphi_bs_update] ip_result_hi= ', ip_result_hi
@@ -710,7 +711,12 @@ end subroutine sauter_apply
 !------------------------------------------------------------------------------
 !> Compute factors required for Sauter bootstrap formula
 !!
-!! Each surface is traced once. The trapped-particle integral
+!! Surface averages and extrema come from the cut-cell quadrature
+!! (@ref oft_gs_cutcell::gs_sauter_cutcell, two passes as the trapped-particle sum
+!! needs Bmax). Surfaces it cannot close, or all surfaces when
+!! `torflux_qgeom_backend=1` (testing), are traced instead.
+!!
+!! Each traced surface is traced once. The trapped-particle integral
 !! \f$ \langle (1-\sqrt{1-b}(1+b/2))/b^2 \rangle \f$, \f$ b=|B|/B_{max} \f$, needs
 !! \f$ B_{max} \f$ of the whole surface, so it is evaluated after the trace by
 !! trapezoidal quadrature over the tracer steps. Surfaces are traced in parallel
@@ -729,6 +735,8 @@ real(8) :: psi_surf,rmax,x1,x2,raxis,zaxis,h,h2,hf,ftu,ftl,t0
 real(8) :: pt(3),pt_last(3),f(3),psi_tmp(1),gop(3,3)
 real(8), allocatable :: pts(:,:),fpol(:),qtmp(:),epstmp(:)
 real(8), pointer :: ptout(:,:),vout(:,:)
+real(8), allocatable :: acc(:,:),ext(:,:),bref(:)
+logical, allocatable :: done(:)
 type(oft_lag_brinterp) :: psi_int
 real(8), parameter :: tol=1.d-10
 integer(4) :: j,cell
@@ -763,8 +771,7 @@ IF(oft_debug_print(1))THEN
   WRITE(*,'(2A,ES11.3)')oft_indent,'Rmax = ',rmax
   CALL oft_decrease_indent
 END IF
-!---Start points (each from the previous one) and F on each surface
-ALLOCATE(pts(2,nr),fpol(nr),qtmp(nr),epstmp(nr))
+ALLOCATE(pts(2,nr),fpol(nr),qtmp(nr),epstmp(nr),done(nr))
 DO j=1,nr
   psi_surf=psi_q(j)*(x2-x1) + x1
   IF(gseq%mode==0)THEN
@@ -772,15 +779,59 @@ DO j=1,nr
   ELSE
     fpol(j)=SIGN(1.d0,gseq%I%f_offset)*SQRT(gseq%ffp_scale*gseq%I%f(psi_surf) + gseq%I%f_offset**2)
   END IF
-  IF(psi_q(j) == 1.d0)CYCLE
+END DO
+!--- Axis guard: flux surface degenerates at psi_N=1; prescribe analytically.
+done=(psi_q == 1.d0)
+DO j=1,nr
+  IF(.NOT.done(j))CYCLE
+  r_avgs(j,:)    = [raxis, 1.d0/raxis, 0.d0]
+  modb_avgs(j,:) = [ABS(fpol(j))/raxis, (fpol(j)/raxis)**2]
+  fc(j)          = 1.d0
+  qtmp(j)        = 0.d0 ! Taken from the previous surface below
+  epstmp(j)      = 0.d0
+END DO
+!---Cut-cell averages and extrema
+sauter_wtime=0.d0
+IF(torflux_qgeom_backend/=1)THEN
+  t0=omp_get_wtime()
+  ALLOCATE(acc(8,nr),ext(3,nr),bref(nr))
+  bref=-1.d0
+  CALL gs_sauter_cutcell(gseq,nr,psi_q,fpol,bref,acc,ext,ok=done)
+  bref=ext(1,:)
+  CALL gs_sauter_cutcell(gseq,nr,psi_q,fpol,bref,acc,ext,ok=done)
+  DO j=1,nr
+    IF((.NOT.done(j)).OR.(psi_q(j)==1.d0))CYCLE
+    r_avgs(j,1)=acc(2,j)/acc(1,j)
+    r_avgs(j,2)=acc(3,j)/acc(1,j)
+    r_avgs(j,3)=acc(4,j)/acc(1,j)
+    modb_avgs(j,1)=acc(5,j)/acc(1,j)
+    modb_avgs(j,2)=acc(6,j)/acc(1,j)
+    h = modb_avgs(j,1)/ext(1,j)
+    h2 = modb_avgs(j,2)/ext(1,j)**2
+    ftu = 1.d0 - h2 / (h**2) * (1.d0 - SQRT(1.d0 - h) * (1.d0 + 0.5d0 * h))
+    hf = acc(8,j)/acc(1,j)
+    ftl = 1.d0 - h2 * hf
+    fc(j) = 1.d0 - (0.75d0 * ftu + 0.25d0 * ftl)
+    qtmp(j) = fpol(j) * acc(7,j) / (2.d0*pi*ABS(x2-x1))
+    epstmp(j) = (ext(2,j) + ext(3,j)) / (2.d0 * r_avgs(j,1))
+  END DO
+  done=done.OR.(psi_q == 1.d0)
+  DEALLOCATE(acc,ext,bref)
+  sauter_wtime=omp_get_wtime()-t0
+  IF(oft_debug_print(1).AND.(.NOT.ALL(done)))WRITE(*,'(2A,I0,A)')oft_indent, &
+    'sauter_fc: tracing ',COUNT(.NOT.done),' surfaces not closed by the cut-cell pass'
+END IF
+!---Start points of the remaining surfaces (each from the previous one)
+DO j=1,nr
+  IF(done(j))CYCLE
   pt=pt_last
-  CALL gs_psi2r(gseq,psi_surf,pt,psi_int=psi_int)
+  CALL gs_psi2r(gseq,psi_q(j)*(x2-x1) + x1,pt,psi_int=psi_int)
   pts(:,j)=pt(1:2)
   pt_last=pt
 END DO
 CALL psi_int%delete()
-!---Trace surfaces
-sauter_wtime=0.d0
+!---Trace the remaining surfaces
+IF(.NOT.ALL(done))THEN
 call set_tracer(1)
 !$omp parallel private(j,field,ptout,vout,h,h2,hf,ftu,ftl,t0) reduction(+:sauter_wtime)
 ALLOCATE(field)
@@ -797,18 +848,7 @@ active_tracer%inv=.TRUE.
 ALLOCATE(ptout(3,active_tracer%maxsteps+1),vout(3,active_tracer%maxsteps))
 !$omp do schedule(dynamic,1)
 do j=1,nr
-  !--- Axis guard: flux surface degenerates at psi_N=1; prescribe analytically.
-  IF(psi_q(j) == 1.d0)THEN
-    r_avgs(j,1)    = raxis
-    r_avgs(j,2)    = 1.d0 / raxis
-    r_avgs(j,3)    = 0.d0
-    modb_avgs(j,1) = ABS(fpol(j)) / raxis
-    modb_avgs(j,2) = (fpol(j) / raxis)**2
-    fc(j)          = 1.d0
-    qtmp(j)        = 0.d0 ! Taken from the previous surface below
-    epstmp(j)      = 0.d0
-    CYCLE
-  END IF
+  IF(done(j))CYCLE
   IF(gseq%diverted.AND.psi_q(j)<0.02d0)THEN
     active_tracer%tol=1.d-10
   ELSE
@@ -846,12 +886,13 @@ CALL active_tracer%delete
 CALL field%delete
 DEALLOCATE(field)
 !$omp end parallel
+END IF
 DO j=1,nr
   IF(psi_q(j) == 1.d0)qtmp(j)=MERGE(qtmp(MAX(j-1,1)), 0.d0, j > 1)
 END DO
 IF(PRESENT(qprof))qprof=qtmp
 IF(PRESENT(eps))eps=epstmp
-DEALLOCATE(pts,fpol,qtmp,epstmp)
+DEALLOCATE(pts,fpol,qtmp,epstmp,done)
 end subroutine sauter_fc
 !------------------------------------------------------------------------------
 !> Trapped-particle integral \f$ \langle (1-\sqrt{1-b}(1+b/2))/b^2 \rangle \f$ by
