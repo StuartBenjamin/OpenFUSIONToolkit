@@ -20,7 +20,7 @@ use oft_mesh_type, only: bmesh_findcell
 use oft_blag_operators, only: oft_lag_brinterp
 use tracing_2d, only: set_tracer, active_tracer, tracinginv_fs
 use grad_shaf_prof_phys, only: eval_jtor_imas, build_Ravg_spline, gs_flux_int, &
-  jphi_update, jphi_copy, jphi_flux_func
+  gs_flux_cumint, jphi_update, jphi_copy, jphi_flux_func
 use spline_mod
 USE oft_io, ONLY: hdf5_create_group, hdf5_write, hdf5_read, &
   hdf5_field_get_sizes, hdf5_field_exist
@@ -44,6 +44,12 @@ TYPE :: boot_ops
   LOGICAL :: taper_edge_jBS = .FALSE. !< Smooth taper of toroidal current (inductive, bootstrap and fixed) to zero at plasma edge (guards against numerical issues at the separatrix)
   REAL(r8) :: taper_edge_psi0 = 0.999_r8 !< psi_N (standard: 0=axis, 1=LCFS) where edge taper begins
   INTEGER(i4) :: taper_edge_shape = 2 !< Edge taper shape: 1=cos² (Hann), 2=quintic smoothstep, 3=cubic power
+  REAL(r8) :: saw_q_s = 0.0_r8 !< Sawtooth reset q on axis (q_s); 0 = off (see @ref saw_reset_1d)
+  REAL(r8) :: saw_dq = 0.03_r8 !< Mixing radius where q_base first reaches saw_q_s + saw_dq beyond the dip
+  REAL(r8) :: saw_tol = 1.0e-4_r8 !< Rel. change in j_saw (vs RMS total) below which j_saw is frozen
+  REAL(r8) :: saw_relax = 1.0_r8 !< Under-relaxation of the j_saw update (1 = none)
+  REAL(r8) :: saw_ramp = 0.01_r8 !< Reset weight ramps over this q deficit below saw_q_s (0 = hard trigger); rule 3 depth threshold
+  INTEGER(i4) :: saw_rule = 1 !< Dip that sets rho_s: 1 = outermost, 2 = innermost, 3 = outermost deeper than saw_ramp, 4 = depth-weighted blend of all
 END TYPE boot_ops
 !------------------------------------------------------------------------------
 !> Cached current profiles produced by the last call to @ref jphi_bs_update.
@@ -60,6 +66,9 @@ TYPE :: boot_profs
   REAL(r8), POINTER, DIMENSION(:) :: j_ind_final => NULL() !< Input jphi, re-scaled & optionally tapered [A/m²]
   REAL(r8), POINTER, DIMENSION(:) :: j_bs_final => NULL() !< Bootstrap current density, optionally isolated/parametrised/tapered [A/m²]
   REAL(r8), POINTER, DIMENSION(:) :: jphi_fixed => NULL() !< Fixed (non-rescaled) toroidal current density, optionally tapered [A/m²]
+  REAL(r8), POINTER, DIMENSION(:) :: j_saw => NULL() !< Sawtooth current = input jphi_saw + q reset redistribution [A/m²]
+  REAL(r8) :: saw_rho_m = 0.0_r8 !< Mixing radius (rho_tor_norm) of the last reset (0 = none)
+  INTEGER(i4) :: saw_n_dips = 0 !< Number of separate q_base < saw_q_s regions at the last reset
 END TYPE boot_profs
 !------------------------------------------------------------------------------
 !> Jphi flux function type for bootstrap current calculation
@@ -75,6 +84,11 @@ type, extends(jphi_flux_func) :: jphi_bs_flux_func
   integer(4) :: dalpha_no_improve = 0 !< Consecutive steps with non-decreasing dalpha
   real(8) :: dalpha_min = huge(1.0d0) !< Running minimum dalpha seen so far
   real(8), pointer, dimension(:) :: j_BS_last => NULL() !< j_BS profile from previous NL iteration (for freeze check)
+  logical :: freeze_saw = .FALSE. !< Set .TRUE. once j_saw converges or stagnates
+  integer(4) :: djsaw_no_improve = 0 !< Consecutive steps with non-decreasing djsaw
+  real(8) :: djsaw_min = huge(1.0d0) !< Running minimum djsaw
+  real(8), pointer, dimension(:) :: j_saw_last => NULL() !< j_saw from previous NL iteration (mu0*A/m²)
+  real(8), pointer, dimension(:) :: jtot_last => NULL() !< Total jphi from previous NL iteration (mu0*A/m²), the current of the equilibrium being traced
   TYPE(boot_ops) :: boot_ops       !< Python read-in ptions for j_bs_update
   TYPE(boot_profs) :: boot_profs   !< Cached current profiles from the last jphi_bs_update call
 contains
@@ -143,6 +157,12 @@ IF(self%boot_ops%initialized)THEN
   CALL hdf5_write(MERGE(1_i4, 0_i4, self%boot_ops%taper_edge_jBS),filename,path//'/BOOT_OPS/TAPER_EDGE_JBS')
   CALL hdf5_write(self%boot_ops%taper_edge_psi0,filename,path//'/BOOT_OPS/TAPER_EDGE_PSI0')
   CALL hdf5_write(self%boot_ops%taper_edge_shape,filename,path//'/BOOT_OPS/TAPER_EDGE_SHAPE')
+  CALL hdf5_write(self%boot_ops%saw_q_s,filename,path//'/BOOT_OPS/SAW_Q_S')
+  CALL hdf5_write(self%boot_ops%saw_dq,filename,path//'/BOOT_OPS/SAW_DQ')
+  CALL hdf5_write(self%boot_ops%saw_tol,filename,path//'/BOOT_OPS/SAW_TOL')
+  CALL hdf5_write(self%boot_ops%saw_relax,filename,path//'/BOOT_OPS/SAW_RELAX')
+  CALL hdf5_write(self%boot_ops%saw_ramp,filename,path//'/BOOT_OPS/SAW_RAMP')
+  CALL hdf5_write(self%boot_ops%saw_rule,filename,path//'/BOOT_OPS/SAW_RULE')
 END IF
 !---Save cached bootstrap current profiles (only when available)
 IF(ASSOCIATED(self%boot_profs%total_j_phi).OR.ASSOCIATED(self%boot_profs%j_bs_raw))THEN
@@ -154,6 +174,8 @@ IF(ASSOCIATED(self%boot_profs%total_j_phi).OR.ASSOCIATED(self%boot_profs%j_bs_ra
     CALL hdf5_write(self%boot_profs%j_bs_final,filename,path//'/BOOT_PROFS/J_BS_FINAL')
     IF(ASSOCIATED(self%boot_profs%jphi_fixed)) &
       CALL hdf5_write(self%boot_profs%jphi_fixed,filename,path//'/BOOT_PROFS/JPHI_FIXED')
+    IF(ASSOCIATED(self%boot_profs%j_saw)) &
+      CALL hdf5_write(self%boot_profs%j_saw,filename,path//'/BOOT_PROFS/J_SAW')
     IF(ASSOCIATED(self%boot_profs%j_bs_raw)) &
       CALL hdf5_write(self%boot_profs%j_bs_raw,filename,path//'/BOOT_PROFS/J_BS_RAW')
     IF(ASSOCIATED(self%boot_profs%jdotb_bs_raw)) &
@@ -211,6 +233,14 @@ IF(hdf5_field_exist(filename,path//'/BOOT_OPS'))THEN
   IF(success) self%boot_ops%taper_edge_jBS = (int_tmp/=0)
   CALL hdf5_read(self%boot_ops%taper_edge_psi0,filename,path//'/BOOT_OPS/TAPER_EDGE_PSI0',success=success)
   CALL hdf5_read(self%boot_ops%taper_edge_shape,filename,path//'/BOOT_OPS/TAPER_EDGE_SHAPE',success=success)
+  IF(hdf5_field_exist(filename,path//'/BOOT_OPS/SAW_Q_S'))THEN
+    CALL hdf5_read(self%boot_ops%saw_q_s,filename,path//'/BOOT_OPS/SAW_Q_S',success=success)
+    CALL hdf5_read(self%boot_ops%saw_dq,filename,path//'/BOOT_OPS/SAW_DQ',success=success)
+    CALL hdf5_read(self%boot_ops%saw_tol,filename,path//'/BOOT_OPS/SAW_TOL',success=success)
+    CALL hdf5_read(self%boot_ops%saw_relax,filename,path//'/BOOT_OPS/SAW_RELAX',success=success)
+    CALL hdf5_read(self%boot_ops%saw_ramp,filename,path//'/BOOT_OPS/SAW_RAMP',success=success)
+    CALL hdf5_read(self%boot_ops%saw_rule,filename,path//'/BOOT_OPS/SAW_RULE',success=success)
+  END IF
   self%boot_ops%initialized = .TRUE.
 END IF
 !---Load cached bootstrap current profiles if available
@@ -234,6 +264,11 @@ IF(hdf5_field_exist(filename,path//'/BOOT_PROFS'))THEN
     IF(hdf5_field_exist(filename,path//'/BOOT_PROFS/JPHI_FIXED'))THEN
       ALLOCATE(self%boot_profs%jphi_fixed(0:SIZE(self%boot_profs%total_j_phi)-1))
       CALL hdf5_read(self%boot_profs%jphi_fixed,filename,path//'/BOOT_PROFS/JPHI_FIXED',success=success)
+    END IF
+    IF(ASSOCIATED(self%boot_profs%j_saw))DEALLOCATE(self%boot_profs%j_saw)
+    IF(hdf5_field_exist(filename,path//'/BOOT_PROFS/J_SAW'))THEN
+      ALLOCATE(self%boot_profs%j_saw(0:SIZE(self%boot_profs%total_j_phi)-1))
+      CALL hdf5_read(self%boot_profs%j_saw,filename,path//'/BOOT_PROFS/J_SAW',success=success)
     END IF
     IF(hdf5_field_exist(filename,path//'/BOOT_PROFS/J_BS_RAW'))THEN
       CALL hdf5_field_get_sizes(filename,path//'/BOOT_PROFS/J_BS_RAW',ndims,dim_sizes)
@@ -325,6 +360,13 @@ SELECT TYPE(new)
     new%dalpha_min = self%dalpha_min
     new%boot_ops = self%boot_ops
     IF(ASSOCIATED(self%j_BS_last)) ALLOCATE(new%j_BS_last, SOURCE=self%j_BS_last)
+    new%freeze_saw = self%freeze_saw
+    new%djsaw_no_improve = self%djsaw_no_improve
+    new%djsaw_min = self%djsaw_min
+    IF(ASSOCIATED(self%j_saw_last)) ALLOCATE(new%j_saw_last, SOURCE=self%j_saw_last)
+    IF(ASSOCIATED(self%jtot_last)) ALLOCATE(new%jtot_last, SOURCE=self%jtot_last)
+    new%boot_profs%saw_rho_m = self%boot_profs%saw_rho_m
+    new%boot_profs%saw_n_dips = self%boot_profs%saw_n_dips
     IF(ASSOCIATED(self%boot_profs%psi_n))ALLOCATE(new%boot_profs%psi_n,SOURCE=self%boot_profs%psi_n)
     IF(ASSOCIATED(self%boot_profs%j_bs_raw))ALLOCATE(new%boot_profs%j_bs_raw,SOURCE=self%boot_profs%j_bs_raw)
     IF(ASSOCIATED(self%boot_profs%jdotb_bs_raw))ALLOCATE(new%boot_profs%jdotb_bs_raw,SOURCE=self%boot_profs%jdotb_bs_raw)
@@ -332,6 +374,7 @@ SELECT TYPE(new)
     IF(ASSOCIATED(self%boot_profs%j_bs_final))ALLOCATE(new%boot_profs%j_bs_final,SOURCE=self%boot_profs%j_bs_final)
     IF(ASSOCIATED(self%boot_profs%j_ind_final))ALLOCATE(new%boot_profs%j_ind_final,SOURCE=self%boot_profs%j_ind_final)
     IF(ASSOCIATED(self%boot_profs%jphi_fixed))ALLOCATE(new%boot_profs%jphi_fixed,SOURCE=self%boot_profs%jphi_fixed)
+    IF(ASSOCIATED(self%boot_profs%j_saw))ALLOCATE(new%boot_profs%j_saw,SOURCE=self%boot_profs%j_saw)
 END SELECT
 end subroutine jphi_bs_copy
 !------------------------------------------------------------------------------
@@ -345,6 +388,8 @@ IF(ASSOCIATED(self%x))DEALLOCATE(self%x)
 IF(ASSOCIATED(self%yp))DEALLOCATE(self%yp)
 IF(ASSOCIATED(self%y))DEALLOCATE(self%y)
 IF(ASSOCIATED(self%j_BS_last))DEALLOCATE(self%j_BS_last)
+IF(ASSOCIATED(self%j_saw_last))DEALLOCATE(self%j_saw_last)
+IF(ASSOCIATED(self%jtot_last))DEALLOCATE(self%jtot_last)
 !---Destroy cached bootstrap current profiles
 IF(ASSOCIATED(self%boot_profs%j_bs_raw))DEALLOCATE(self%boot_profs%j_bs_raw)
 IF(ASSOCIATED(self%boot_profs%jdotb_bs_raw))DEALLOCATE(self%boot_profs%jdotb_bs_raw)
@@ -352,6 +397,7 @@ IF(ASSOCIATED(self%boot_profs%total_j_phi))DEALLOCATE(self%boot_profs%total_j_ph
 IF(ASSOCIATED(self%boot_profs%j_bs_final))DEALLOCATE(self%boot_profs%j_bs_final)
 IF(ASSOCIATED(self%boot_profs%j_ind_final))DEALLOCATE(self%boot_profs%j_ind_final)
 IF(ASSOCIATED(self%boot_profs%jphi_fixed))DEALLOCATE(self%boot_profs%jphi_fixed)
+IF(ASSOCIATED(self%boot_profs%j_saw))DEALLOCATE(self%boot_profs%j_saw)
 IF(ASSOCIATED(self%boot_profs%psi_n))DEALLOCATE(self%boot_profs%psi_n)
 end subroutine jphi_bs_delete
 !---------------------------------------------------------------------------------
@@ -360,11 +406,13 @@ end subroutine jphi_bs_delete
 !> Each call (one NL iteration):
 !>   1. Build <R>/<1/R>/<1/R^2> spline on self%x; pressure scale.
 !>   2. Evaluate fixed current jphi_fixed and bootstrap current j_BS on self%x (or reuse cache if frozen).
-!>   3. Apply edge taper to j_BS, jphi_ind and jphi_fixed component-wise.
+!>   3. Apply edge taper to j_BS, jphi_ind, jphi_fixed and the input sawtooth current component-wise.
 !>   4. Solve analytically for alpha: the exact I_p (gs_flux_int of eval_jtor_imas, eq. A9c) is
 !>      affine in alpha, so two evaluations (alpha=0, alpha=1) give
 !>      alpha = (Ip_target - Ip_lo)/(Ip_hi - Ip_lo).
-!>   5. Assemble jphi_total = alpha*jphi_ind + j_BS + jphi_fixed; compute F*F' knots.
+!>   4a. Sawtooth reset (saw_q_s > 0): j_saw = jphi_saw + the Ip-neutral current that resets the q of
+!>      base = alpha*jphi_ind + j_BS + jphi_fixed + jphi_saw to a monotone profile (@ref saw_redistribute).
+!>   5. Assemble jphi_total = alpha*jphi_ind + j_BS + jphi_fixed + j_saw; compute F*F' knots.
 !>   6. Diagnostics (if diagnose_bs is set).
 !---------------------------------------------------------------------------------
 SUBROUTINE jphi_bs_update(self, gseq)
@@ -383,6 +431,11 @@ REAL(r8), ALLOCATABLE :: j_spike_mask_tmp(:)  !< Raw masked (pre-fit) spike prof
 REAL(r8), ALLOCATABLE :: jphi_total(:)
 REAL(r8), ALLOCATABLE :: jphi_ind(:)  !< Tapered copy of self%jphi (= self%jphi when taper off)
 REAL(r8), ALLOCATABLE :: jphi_fixed(:)  !< Fixed current from gseq%jphi_fixed (A/m², mu0*A/m² from step 3; 0 if unset)
+! Sawtooth current (mu0*A/m² from step 3): input, value entering the alpha solve, final
+REAL(r8), ALLOCATABLE :: j_saw_in(:), j_saw_cur(:), j_saw(:), dj_saw(:)
+REAL(r8), ALLOCATABLE :: xn(:), psi_qg(:), q_g(:), cflds(:,:), cum(:,:)
+LOGICAL :: saw_on, do_saw
+REAL(r8) :: djsaw
 ! Alpha-solve scalars
 REAL(r8) :: alpha, ip_target, ip_ind, ip_result_lo, ip_result_hi, dalpha
 ! Relative change in bootstrap current for freeze check
@@ -421,7 +474,15 @@ IF(.NOT.ASSOCIATED(gseq%Zeff)) &
 !--- 1. Build <R>/<1/R>/<1/R^2> spline (I_p measure, F*F' map); pressure scale.
 !   R_spline stays alive until after the F*F' loop (step 6).
 ALLOCATE(jtor(0:self%npsi))
-CALL build_Ravg_spline(gseq, self%ngeom, R_spline)
+saw_on = self%boot_ops%saw_q_s > 0.0_r8
+do_saw = saw_on .AND. (.NOT.self%freeze_saw) .AND. ASSOCIATED(self%jtot_last)
+djsaw = 0.0_r8
+IF(do_saw)THEN
+  ALLOCATE(psi_qg(self%ngeom), q_g(self%ngeom))
+  CALL build_Ravg_spline(gseq, self%ngeom, R_spline, psi_q_out=psi_qg, q_out=q_g)
+ELSE
+  CALL build_Ravg_spline(gseq, self%ngeom, R_spline)
+END IF
 CALL gseq%P%update(gseq) ! Make sure pressure profile is up to date with EQ
 IF(ASSOCIATED(gseq%P_ani)) &
   CALL oft_abort('Jphi profiles do not support anisotropic pressure', &
@@ -435,6 +496,14 @@ IF(ASSOCIATED(gseq%jphi_fixed))THEN
   jphi_fixed(0) = gseq%jphi_fixed%fp(0.0_r8)
   DO i = 1, self%npsi
     jphi_fixed(i) = gseq%jphi_fixed%fp(self%x(i))
+  END DO
+END IF
+ALLOCATE(j_saw_in(0:self%npsi))
+j_saw_in = 0.0_r8
+IF(ASSOCIATED(gseq%jphi_saw))THEN
+  j_saw_in(0) = gseq%jphi_saw%fp(0.0_r8)
+  DO i = 1, self%npsi
+    j_saw_in(i) = gseq%jphi_saw%fp(self%x(i))
   END DO
 END IF
 ALLOCATE(j_BS(0:self%npsi))
@@ -530,8 +599,33 @@ IF (self%boot_ops%taper_edge_jBS) THEN
                         1.0_r8 - self%boot_ops%taper_edge_psi0, &
                         self%boot_ops%taper_edge_shape, &
                         oft_psi_conv=.TRUE.)
+  CALL apply_edge_taper(self%npsi+1, [0.0_r8, self%x], j_saw_in, &
+                        1.0_r8 - self%boot_ops%taper_edge_psi0, &
+                        self%boot_ops%taper_edge_shape, &
+                        oft_psi_conv=.TRUE.)
 END IF
 ALLOCATE(jphi_total(0:self%npsi))
+ALLOCATE(xn(0:self%npsi), j_saw_cur(0:self%npsi), j_saw(0:self%npsi))
+xn = [0.0_r8, self%x]
+!   Sawtooth current entering the alpha solve: last iterate (or the input until the first reset)
+j_saw_cur = j_saw_in
+IF(saw_on .AND. ASSOCIATED(self%j_saw_last))j_saw_cur = self%j_saw_last
+!   One quadrature pass for the alpha solve and the reset's enclosed currents: lo (alpha=0 with the
+!   input saw), ind (inductive, linear), dsaw (j_saw_cur - input, linear), eq (last total), area.
+IF(do_saw)THEN
+  ALLOCATE(cflds(self%npsi+1,5), cum(self%npsi+1,5))
+  jphi_total = j_BS + jphi_fixed + j_saw_in
+  CALL eval_jtor_imas(gseq, R_spline, xn, self%npsi+1, jphi_total, pscale, cflds(:,1))
+  jphi_total = jphi_ind + j_BS + jphi_fixed + j_saw_in
+  CALL eval_jtor_imas(gseq, R_spline, xn, self%npsi+1, jphi_total, pscale, jtor)
+  cflds(:,2) = jtor - cflds(:,1)
+  jphi_total = j_BS + jphi_fixed + j_saw_cur
+  CALL eval_jtor_imas(gseq, R_spline, xn, self%npsi+1, jphi_total, pscale, jtor)
+  cflds(:,3) = jtor - cflds(:,1)
+  CALL eval_jtor_imas(gseq, R_spline, xn, self%npsi+1, self%jtot_last, pscale, cflds(:,4))
+  cflds(:,5) = 1.0_r8
+  CALL gs_flux_cumint(gseq, xn, cflds, self%npsi+1, 5, cum)
+END IF
 !--- 4. Solve analytically for alpha.
 !   gs_flux_int is linear in alpha; two evaluations (alpha=0 and alpha=1) give
 !   alpha = (Ip_target - Ip_lo) / (Ip_hi - Ip_lo).  Skip once frozen.
@@ -544,12 +638,17 @@ IF(self%freeze_alpha) THEN
   ip_result_hi = 0.0_r8
 ELSE
   !--- Not yet frozen: exact linear solve for alpha.
-  jphi_total = j_BS + jphi_fixed
-  CALL eval_jtor_imas(gseq, R_spline, [0.0_r8, self%x], self%npsi+1, jphi_total, pscale, jtor)
-  CALL gs_flux_int(gseq, [0.0_r8, self%x], jtor, self%npsi+1, ip_result_lo)
-  jphi_total = jphi_ind + j_BS + jphi_fixed
-  CALL eval_jtor_imas(gseq, R_spline, [0.0_r8, self%x], self%npsi+1, jphi_total, pscale, jtor)
-  CALL gs_flux_int(gseq, [0.0_r8, self%x], jtor, self%npsi+1, ip_result_hi)
+  IF(do_saw)THEN
+    ip_result_lo = cum(1,1) + cum(1,3)
+    ip_result_hi = ip_result_lo + cum(1,2)
+  ELSE
+    jphi_total = j_BS + jphi_fixed + j_saw_cur
+    CALL eval_jtor_imas(gseq, R_spline, xn, self%npsi+1, jphi_total, pscale, jtor)
+    CALL gs_flux_int(gseq, xn, jtor, self%npsi+1, ip_result_lo)
+    jphi_total = jphi_ind + j_BS + jphi_fixed + j_saw_cur
+    CALL eval_jtor_imas(gseq, R_spline, xn, self%npsi+1, jphi_total, pscale, jtor)
+    CALL gs_flux_int(gseq, xn, jtor, self%npsi+1, ip_result_hi)
+  END IF
   ip_ind = ip_result_hi - ip_result_lo
   IF(ABS(ip_ind) > 0.0_r8)THEN
     alpha = (ip_target - ip_result_lo) / ip_ind
@@ -594,8 +693,49 @@ IF(ip_result_lo > ip_target)THEN
     ' A) exceeds target plasma current (', ip_target/mu0, ' A); inductive current is reversed'
   IF(oft_env%pm)CALL oft_warn(TRIM(char_buf))
 END IF
+!--- 4a. Sawtooth reset of the base current (alpha now known); j_saw freeze check.
+IF(do_saw)THEN
+  ALLOCATE(dj_saw(0:self%npsi))
+  CALL saw_redistribute(self, gseq, R_spline, xn, psi_qg, q_g, cum(:,1) + alpha*cum(:,2), &
+                        cum(:,4), cum(:,5), dj_saw)
+  j_saw = j_saw_in + self%boot_ops%saw_relax*dj_saw + (1.0_r8 - self%boot_ops%saw_relax)*(j_saw_cur - j_saw_in)
+  jphi_total = alpha * jphi_ind + j_BS + jphi_fixed + j_saw
+  djsaw = SQRT(SUM((j_saw - self%j_saw_last)**2)) / MAX(SQRT(SUM(jphi_total**2)), 1.0e-30_r8)
+  IF(djsaw < self%boot_ops%saw_tol)THEN
+    self%freeze_saw = .TRUE.
+    IF(oft_env%pm)WRITE(*,*)' Freezing sawtooth current.'
+  ELSE IF(djsaw >= self%djsaw_min)THEN
+    self%djsaw_no_improve = self%djsaw_no_improve + 1
+    IF(self%djsaw_no_improve >= 2)THEN
+      WRITE(char_buf,'(A,ES12.4,A,ES12.4,A)') &
+        'Sawtooth current convergence stalled, relative change per nonlinear step = ', djsaw, &
+        ', above set tolerance (saw_tol=', self%boot_ops%saw_tol, ')'
+      IF(djsaw > self%djBS_stol)THEN
+        self%djsaw_no_improve = 0
+      ELSE
+        self%freeze_saw = .TRUE.
+        char_buf = TRIM(char_buf) // ' Freezing sawtooth current.'
+      END IF
+      IF(oft_env%pm)CALL oft_warn(TRIM(char_buf))
+    END IF
+  ELSE
+    self%djsaw_no_improve = 0
+    self%djsaw_min = djsaw
+  END IF
+  DEALLOCATE(dj_saw, cflds, cum, psi_qg, q_g)
+ELSE
+  j_saw = j_saw_cur
+END IF
+IF(saw_on)THEN
+  IF(.NOT.ASSOCIATED(self%j_saw_last))ALLOCATE(self%j_saw_last(0:self%npsi))
+  self%j_saw_last = j_saw
+END IF
 !--- 5. Assemble jphi_total, save profiles
-jphi_total = alpha * jphi_ind + j_BS + jphi_fixed
+jphi_total = alpha * jphi_ind + j_BS + jphi_fixed + j_saw
+IF(saw_on)THEN
+  IF(.NOT.ASSOCIATED(self%jtot_last))ALLOCATE(self%jtot_last(0:self%npsi))
+  self%jtot_last = jphi_total
+END IF
 IF(.NOT.ASSOCIATED(self%boot_profs%total_j_phi))THEN
   ALLOCATE(self%boot_profs%psi_n(0:self%npsi))
   ALLOCATE(self%boot_profs%total_j_phi(0:self%npsi))
@@ -603,6 +743,8 @@ IF(.NOT.ASSOCIATED(self%boot_profs%total_j_phi))THEN
   ALLOCATE(self%boot_profs%j_ind_final(0:self%npsi))
 END IF
 IF(.NOT.ASSOCIATED(self%boot_profs%jphi_fixed))ALLOCATE(self%boot_profs%jphi_fixed(0:self%npsi))
+IF(.NOT.ASSOCIATED(self%boot_profs%j_saw))ALLOCATE(self%boot_profs%j_saw(0:self%npsi))
+self%boot_profs%j_saw       = j_saw/mu0
 self%boot_profs%psi_n       = [0.0_r8, self%x]
 self%boot_profs%total_j_phi = jphi_total/mu0
 self%boot_profs%j_bs_final  = j_BS/mu0
@@ -636,6 +778,11 @@ IF(self%boot_ops%diagnose_bs)THEN
   WRITE(*,'(A,ES12.4)') '  [jphi_bs_update] j_BS max    = ', MAXVAL(ABS(j_BS))
   WRITE(*,'(A,ES12.4)') '  [jphi_bs_update] jphi max    = ', MAXVAL(ABS(self%jphi))
   WRITE(*,'(A,ES12.4)') '  [jphi_bs_update] jphi_fixed max = ', MAXVAL(ABS(jphi_fixed))
+  IF(saw_on)THEN
+    WRITE(*,'(A,ES12.4)') '  [jphi_bs_update] j_saw max   = ', MAXVAL(ABS(j_saw))/mu0
+    WRITE(*,'(A,ES12.4)') '  [jphi_bs_update] djsaw       = ', djsaw
+    WRITE(*,'(A,L1)')     '  [jphi_bs_update] saw_frozen  = ', self%freeze_saw
+  END IF
   !--- Side-by-side Ip comparison: FEM nonlinear solve vs profile flux integral
   CALL gs_itor_nl(gseq, itor_nl)
   CALL eval_jtor_imas(gseq, R_spline, [0.0_r8, self%x], self%npsi+1, jphi_total, pscale, jtor)
@@ -646,9 +793,205 @@ IF(self%boot_ops%diagnose_bs)THEN
 END IF
 !--- Clean up
 DEALLOCATE(j_BS, jphi_total, jphi_ind, jphi_fixed, jtor)
+DEALLOCATE(j_saw_in, j_saw_cur, j_saw, xn)
 CALL spline_dealloc(R_spline)
 i=self%set_cofs(self%yp)
 END SUBROUTINE jphi_bs_update
+!---------------------------------------------------------------------------------
+!> Sawtooth reset current on the nodes `xn` (OFT convention, mu0*A/m², TokaMaker jphi).
+!!
+!! q_base = q_eq*I_eq/I_base is the q that the base current implies in the traced geometry
+!! (q*I is geometric). rho = sqrt(Phi_N), Phi from int q_eq dpsi. @ref saw_reset_1d gives the
+!! reset; dI/dA is mapped back to jphi with the linear part of eval_jtor_imas.
+!---------------------------------------------------------------------------------
+SUBROUTINE saw_redistribute(self, gseq, R_spline, xn, psi_qg, q_g, I_base, I_eq, area, dj)
+CLASS(jphi_bs_flux_func), INTENT(inout) :: self
+CLASS(gs_equil), INTENT(inout) :: gseq
+TYPE(spline_type), INTENT(inout) :: R_spline
+REAL(r8), INTENT(in) :: xn(:) !< Nodes, 0 at LCFS, 1 at axis [n]
+REAL(r8), INTENT(in) :: psi_qg(:) !< Traced surfaces (same convention) [ngeom]
+REAL(r8), INTENT(in) :: q_g(:) !< q on psi_qg [ngeom]
+REAL(r8), INTENT(in) :: I_base(:) !< Enclosed base current at each node (gs_flux_cumint) [n]
+REAL(r8), INTENT(in) :: I_eq(:) !< Enclosed current of the traced equilibrium [n]
+REAL(r8), INTENT(in) :: area(:) !< Enclosed area [n]
+REAL(r8), INTENT(out) :: dj(:) !< Reset current [n]
+INTEGER(i4) :: n, i, k, n_dips
+REAL(r8) :: rho_s, rho_m, w
+REAL(r8), ALLOCATABLE :: q_eq(:), c1(:), rho(:), qb(:), Ib(:), Ar(:), qn(:), djr(:), r(:), phi(:)
+n = SIZE(xn)
+ALLOCATE(q_eq(n), c1(n), rho(n), qb(n), Ib(n), Ar(n), qn(n), djr(n), r(n), phi(n))
+!---Flip to axis-first order (index 1 = innermost node)
+DO i = 1, n
+  k = n + 1 - i
+  q_eq(i) = linterp(psi_qg, ABS(q_g), SIZE(psi_qg), xn(k), 1)
+  CALL spline_eval(R_spline, xn(k), 0)
+  c1(i) = R_spline%f(3)/R_spline%f(2)**2
+  Ib(i) = I_base(k)
+  Ar(i) = area(k)
+  r(i) = 0.0_r8
+  IF(ABS(I_base(k)) > 0.0_r8 .AND. Ar(i) > 0.0_r8) r(i) = I_eq(k)/I_base(k)
+END DO
+IF(r(1) == 0.0_r8) r(1) = r(2)
+qb = q_eq*r
+!---rho_tor_norm from Phi = int q dpsi_N, from the innermost node (its inner piece as a rectangle)
+phi(1) = q_eq(1)*(1.0_r8 - xn(n))
+DO i = 2, n
+  phi(i) = phi(i-1) + 0.5_r8*(q_eq(i) + q_eq(i-1))*(xn(n+2-i) - xn(n+1-i))
+END DO
+rho = SQRT(phi/phi(n))
+CALL saw_reset_1d(n, rho, qb, Ib, Ar, c1, self%boot_ops%saw_q_s, self%boot_ops%saw_dq, &
+                  self%boot_ops%saw_ramp, self%boot_ops%saw_rule, qn, djr, rho_s, rho_m, n_dips, w)
+DO i = 1, n
+  dj(n + 1 - i) = djr(i)
+END DO
+self%boot_profs%saw_rho_m = rho_m
+self%boot_profs%saw_n_dips = n_dips
+IF(self%boot_ops%diagnose_bs)THEN
+  WRITE(*,'(A,2F8.4,I3,F7.3,2F8.4)') '  [saw] rho_s rho_m n_dips w q_base(0) q_new(0) = ', &
+    rho_s, rho_m, n_dips, w, qb(1), qn(1)
+END IF
+DEALLOCATE(q_eq, c1, rho, qb, Ib, Ar, qn, djr, r, phi)
+END SUBROUTINE saw_redistribute
+!---------------------------------------------------------------------------------
+!> Monotone sawtooth q reset on a 1-D profile (axis first), after FUSE's saw_crash!.
+!!
+!! Reset from dip k (q < q_s region k): rho_m is the first crossing of q = q_s + dq beyond the
+!! region, interpolated so it moves continuously; inside rho_m q_t = q_s + dq*p(rho/rho_m), p C1 onto
+!! q at rho_m (cubic, or x^m for slope m > 3). `rule` picks the dip: 1 outermost, 2 innermost,
+!! 3 outermost deeper than `ramp` (else innermost), each weighted by w = clamp(depth/ramp, 0, 1)
+!! (1 for ramp <= 0); 4 blends the resets of all dips from the axis out, q_new <- q_new +
+!! w_k*(q_t,k - q_new), continuous as dips appear or merge. dI = I*(q/q_new - 1), dj = (d dI/dA)/c1.
+!! rho_s / rho_m: dip end and mixing radius of the chosen (rule 4: w-blended) reset.
+!---------------------------------------------------------------------------------
+SUBROUTINE saw_reset_1d(n, rho, q, I, A, c1, q_s, dq, ramp, rule, q_new, dj, rho_s, rho_m, n_dips, w)
+INTEGER(i4), INTENT(in) :: n
+REAL(r8), INTENT(in) :: rho(n) !< Radius, ascending from the axis
+REAL(r8), INTENT(in) :: q(n) !< Base q
+REAL(r8), INTENT(in) :: I(n) !< Enclosed current
+REAL(r8), INTENT(in) :: A(n) !< Enclosed area
+REAL(r8), INTENT(in) :: c1(n) !< d(jtor)/d(jphi)
+REAL(r8), INTENT(in) :: q_s, dq, ramp
+INTEGER(i4), INTENT(in) :: rule
+REAL(r8), INTENT(out) :: q_new(n), dj(n), rho_s, rho_m, w
+INTEGER(i4), INTENT(out) :: n_dips
+INTEGER(i4) :: k, ireg
+INTEGER(i4), ALLOCATABLE :: reg_start(:), reg_end(:)
+REAL(r8) :: rs, rm, wk
+LOGICAL :: ok
+REAL(r8), ALLOCATABLE :: dI(:), gq(:), qt(:)
+q_new = q; dj = 0.0_r8; rho_s = 0.0_r8; rho_m = 0.0_r8; w = 0.0_r8; n_dips = 0
+IF(n < 3)RETURN
+!---Separate q < q_s regions [reg_start(k), reg_end(k)]
+ALLOCATE(reg_start(n), reg_end(n), gq(n), dI(n), qt(n))
+DO k = 1, n
+  IF(q(k) >= q_s)CYCLE
+  IF(k == 1)THEN
+    n_dips = n_dips + 1
+    reg_start(n_dips) = k
+  ELSE IF(q(k-1) >= q_s)THEN
+    n_dips = n_dips + 1
+    reg_start(n_dips) = k
+  END IF
+  reg_end(n_dips) = k
+END DO
+IF(n_dips == 0)RETURN
+CALL grad_nonuniform(n, rho, q, gq)
+IF(rule == 4)THEN
+  DO k = 1, n_dips
+    CALL full_reset(k, qt, rs, rm, ok)
+    IF(.NOT.ok)CYCLE
+    wk = dip_weight(k)
+    q_new = q_new + wk*(qt - q_new)
+    rho_s = rho_s + wk*(rs - rho_s)
+    rho_m = rho_m + wk*(rm - rho_m)
+    w = MAX(w, wk)
+  END DO
+ELSE
+  SELECT CASE(rule)
+  CASE(2)
+    ireg = 1
+  CASE(3)
+    ireg = 1
+    DO k = n_dips, 1, -1
+      IF(q_s - MINVAL(q(reg_start(k):reg_end(k))) > ramp)THEN
+        ireg = k
+        EXIT
+      END IF
+    END DO
+  CASE DEFAULT
+    ireg = n_dips
+  END SELECT
+  CALL full_reset(ireg, qt, rho_s, rho_m, ok)
+  IF(ok)THEN
+    !---Trigger weight from the deepest point inside rho_m
+    w = 1.0_r8
+    IF(ramp > 0.0_r8)w = MIN(MAX((q_s - MINVAL(q, MASK=(rho < rho_m)))/ramp, 0.0_r8), 1.0_r8)
+    q_new = q + w*(qt - q)
+  ELSE
+    rho_s = 0.0_r8; rho_m = 0.0_r8
+  END IF
+END IF
+dI = I*(q/q_new - 1.0_r8)
+CALL grad_nonuniform(n, A, dI, dj)
+dj = dj/c1
+DEALLOCATE(reg_start, reg_end, gq, dI, qt)
+CONTAINS
+!---Full (w = 1) reset from the end of dip region kr; ok = .FALSE. if no mixing radius
+SUBROUTINE full_reset(kr, qt_, rs_, rm_, ok_)
+INTEGER(i4), INTENT(in) :: kr
+REAL(r8), INTENT(out) :: qt_(n), rs_, rm_
+LOGICAL, INTENT(out) :: ok_
+INTEGER(i4) :: is, jm, kk
+REAL(r8) :: qm, slope, m, x, p
+qt_ = q; rs_ = 0.0_r8; rm_ = 0.0_r8; ok_ = .FALSE.
+is = reg_end(kr)
+IF(is >= n)RETURN
+rs_ = rho(is) + (q_s - q(is))/(q(is+1) - q(is))*(rho(is+1) - rho(is))
+qm = q_s + dq
+jm = 0
+DO kk = is + 1, n
+  IF(q(kk) >= qm)THEN
+    jm = kk
+    EXIT
+  END IF
+END DO
+IF(jm == 0)RETURN
+rm_ = rho(jm-1) + (qm - q(jm-1))/(q(jm) - q(jm-1))*(rho(jm) - rho(jm-1))
+!---Slope at rho_m from interpolated nodal gradients (continuous in rho_m)
+slope = gq(jm-1) + (rm_ - rho(jm-1))/(rho(jm) - rho(jm-1))*(gq(jm) - gq(jm-1))
+m = MAX(rm_*slope/dq, 0.0_r8)
+DO kk = 1, jm - 1
+  x = rho(kk)/rm_
+  IF(m <= 3.0_r8)THEN
+    p = (3.0_r8 - 2.0_r8*x)*x**2 + m*(x**3 - x**2)
+  ELSE
+    p = x**m
+  END IF
+  qt_(kk) = q_s + dq*p
+END DO
+ok_ = .TRUE.
+END SUBROUTINE full_reset
+!---Weight of dip region kr from its depth below q_s
+REAL(r8) FUNCTION dip_weight(kr)
+INTEGER(i4), INTENT(in) :: kr
+dip_weight = 1.0_r8
+IF(ramp > 0.0_r8)dip_weight = MIN(MAX((q_s - MINVAL(q(reg_start(kr):reg_end(kr))))/ramp, 0.0_r8), 1.0_r8)
+END FUNCTION dip_weight
+!---Derivative dy/dx on a non-uniform grid (2nd-order interior, one-sided ends)
+SUBROUTINE grad_nonuniform(nn, xx, yy, dy)
+INTEGER(i4), INTENT(in) :: nn
+REAL(r8), INTENT(in) :: xx(nn), yy(nn)
+REAL(r8), INTENT(out) :: dy(nn)
+INTEGER(i4) :: kk
+REAL(r8) :: h1, h2
+dy(1) = (yy(2) - yy(1))/(xx(2) - xx(1))
+dy(nn) = (yy(nn) - yy(nn-1))/(xx(nn) - xx(nn-1))
+DO kk = 2, nn - 1
+  h1 = xx(kk) - xx(kk-1); h2 = xx(kk+1) - xx(kk)
+  dy(kk) = (h1**2*yy(kk+1) - h2**2*yy(kk-1) + (h2**2 - h1**2)*yy(kk))/(h1*h2*(h1 + h2))
+END DO
+END SUBROUTINE grad_nonuniform
+END SUBROUTINE saw_reset_1d
 !------------------------------------------------------------------------------
 !> Evaluate terms in augmented tracing ODE for computing Sauter factors
 !! (see @ref sauter_fc)

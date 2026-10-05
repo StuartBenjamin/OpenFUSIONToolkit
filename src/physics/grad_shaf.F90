@@ -316,6 +316,7 @@ TYPE :: gs_equil
   CLASS(flux_func), POINTER :: ni => NULL() !< Ion density flux function [m^-3]
   CLASS(flux_func), POINTER :: Zeff => NULL() !< Effective charge flux function (dimensionless)
   CLASS(flux_func), POINTER :: jphi_fixed => NULL() !< Fixed (non-rescaled) toroidal current density flux function [A/m^2]
+  CLASS(flux_func), POINTER :: jphi_saw => NULL() !< Input sawtooth toroidal current density flux function [A/m^2] (bootstrap profile only)
   TYPE(gs_factory), POINTER :: device => NULL() !< Device/factory object for equilibrium
 CONTAINS
   !>
@@ -1067,6 +1068,7 @@ IF(ASSOCIATED(source%ne))CALL source%ne%copy(self%ne)
 IF(ASSOCIATED(source%ni))CALL source%ni%copy(self%ni)
 IF(ASSOCIATED(source%Zeff))CALL source%Zeff%copy(self%Zeff)
 IF(ASSOCIATED(source%jphi_fixed))CALL source%jphi_fixed%copy(self%jphi_fixed)
+IF(ASSOCIATED(source%jphi_saw))CALL source%jphi_saw%copy(self%jphi_saw)
 self%diverted=source%diverted
 self%has_plasma=source%has_plasma
 self%mode=source%mode
@@ -5972,6 +5974,10 @@ END IF
 IF(ASSOCIATED(self%jphi_fixed))THEN
   CALL self%jphi_fixed%delete()
   DEALLOCATE(self%jphi_fixed)
+END IF
+IF(ASSOCIATED(self%jphi_saw))THEN
+  CALL self%jphi_saw%delete()
+  DEALLOCATE(self%jphi_saw)
 END IF
 IF(ASSOCIATED(self%P_ani))THEN
   CALL self%P_ani%delete()
