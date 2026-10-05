@@ -999,6 +999,7 @@ def solve_with_bootstrap(mygs,
                     'j_fixed' : _results.get('jphi_fixed'),
                     'j_saw' : _results.get('j_saw'),
                     'saw_rho_m' : _results.get('saw_rho_m'),
+                    'saw_rho_out' : _results.get('saw_rho_out'),
                     'saw_n_dips' : _results.get('saw_n_dips'),
                     'jdotb_BS' : _results.get('jdotb_bs_raw'),
                     'scale_j0' : 1.0,
@@ -1321,14 +1322,16 @@ def solve_with_bootstrap(mygs,
     return results
 
 
-def _saw_reset_1d(rho, q, itor, area, c1, q_s, dq=0.03, ramp=0.01, rule=1):
+def _saw_reset_1d(rho, q, itor, area, c1, q_s, dq=0.03, ramp=0.01, rule=2):
     r'''! Fortran 1-D sawtooth q reset (grad_shaf_bootstrap::saw_reset_1d) on given profiles, axis first
 
-    @result (q_new, dj, dict(rho_s, rho_m, n_dips, w)); dj in the units of itor/area divided by c1
+    @param rule 1 = fuse (axis to rho_m), 2 = local (each dip, two-sided)
+    @result (q_new, dj, dict(rho_s, rho_m, rho_out, n_dips, w, wr)); dj in the units of itor/area divided by c1,
+      wr the per-node reset weight
     '''
     from ._interface import tokamaker_saw_reset_1d
     arrs = [numpy.ascontiguousarray(a, dtype=numpy.float64) for a in (rho, q, itor, area, c1)]
     n = arrs[0].size
-    q_new, dj, scal = numpy.zeros(n), numpy.zeros(n), numpy.zeros(4)
-    tokamaker_saw_reset_1d(n, *arrs, float(q_s), float(dq), float(ramp), int(rule), q_new, dj, scal)
-    return q_new, dj, {'rho_s': scal[0], 'rho_m': scal[1], 'n_dips': int(scal[2]), 'w': scal[3]}
+    q_new, dj, wr, scal = numpy.zeros(n), numpy.zeros(n), numpy.zeros(n), numpy.zeros(5)
+    tokamaker_saw_reset_1d(n, *arrs, float(q_s), float(dq), float(ramp), int(rule), q_new, dj, wr, scal)
+    return q_new, dj, {'rho_s': scal[0], 'rho_m': scal[1], 'rho_out': scal[4], 'n_dips': int(scal[2]), 'w': scal[3], 'wr': wr}

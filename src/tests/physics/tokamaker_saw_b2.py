@@ -1,4 +1,5 @@
-'''Sawtooth reset in full ITER SWB solves: reversed-shear base, plus axis-peaked fixed current (W-shaped q).
+'''Sawtooth reset in full ITER SWB solves, rule 1 (fuse) against rule 2 (local): reversed-shear base, plus
+axis-peaked fixed current (W-shaped q).
 
 Run from src/tests/physics (ITER_geom.json); writes figures and summary.json to outdir. Per-iteration
 [saw] diagnostics go to stdout (diagnose_bs), so redirect it to a log.
@@ -32,9 +33,11 @@ def solve(label, **kw):
     dt = time.perf_counter() - t0
     psi_q, q, _, _, _, _ = mygs.get_q(npsi=100)
     print(f'===== END {label}: {dt:.1f} s, q0 {q[0]:.4f}, min q {q.min():.4f}, '
-          f'rho_m {p.get("saw_rho_m", 0):.3f}, n_dips {p.get("saw_n_dips", 0)}, Ip {mygs.get_stats()["Ip"]:.6e}', flush=True)
+          f'rho_m {p.get("saw_rho_m", 0):.3f}, rho_out {p.get("saw_rho_out", 0):.3f}, n_dips {p.get("saw_n_dips", 0)}, '
+          f'Ip {mygs.get_stats()["Ip"]:.6e}', flush=True)
     return dict(label=label, t=dt, psi_q=psi_q.tolist(), q=q.tolist(), psi_n=p['psi_n'].tolist(),
                 j_saw=p['j_saw'].tolist(), total=p['total_j_phi'].tolist(), rho_m=p.get('saw_rho_m', 0.0),
+                rho_out=p.get('saw_rho_out', 0.0),
                 n_dips=p.get('saw_n_dips', 0), Ip=float(mygs.get_stats()['Ip']))
 
 
@@ -48,15 +51,15 @@ for amp in (0.0, 1.5e5, 3.0e5):
     core = {'x': x, 'y': amp * np.exp(-(x / 0.12)**2)}
     lab = f'core{amp:.0e}'
     runs.append(solve(lab + '_off', jphi_fixed_prof=dict(core), saw_q_s=0.0))
-    for rule in (1, 2, 4):
-        runs.append(solve(f'{lab}_saw_rule{rule}', jphi_fixed_prof=dict(core), saw_q_s=q_s, saw_rule=rule,
+    for rule in (1, 2):
+        runs.append(solve(f'{lab}_saw_{("fuse", "local")[rule-1]}', jphi_fixed_prof=dict(core), saw_q_s=q_s, saw_rule=rule,
                           diagnose_bs=True))
 
 with open(os.path.join(outdir, 'summary.json'), 'w') as fid:
     json.dump({'q_s': q_s, 'runs': runs}, fid)
 fig, ax = plt.subplots(1, 2, figsize=(12, 4.5))
 for r in runs:
-    ls = '-' if 'saw' in r['label'] else '--'
+    ls = '-' if 'local' in r['label'] else ('--' if 'fuse' in r['label'] else ':')
     ax[0].plot(r['psi_q'], r['q'], ls=ls, label=r['label'])
     ax[1].plot(r['psi_n'], np.asarray(r['j_saw'])/1e6, ls=ls, label=r['label'])
 ax[0].axhline(q_s, color='r', lw=0.8); ax[0].set_xlabel('psi_N'); ax[0].set_ylabel('q'); ax[0].set_ylim(0.8, 2.5); ax[0].set_xlim(0, 0.8)
