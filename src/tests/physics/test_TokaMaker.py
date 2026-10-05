@@ -2033,6 +2033,16 @@ def run_ITER_bootstrap_saw_internal(mesh_resolution, fe_order, mp_q):
         outside = rho_of_psi > p_on['saw_rho_m'] + 0.05
         if np.max(np.abs(p_on['j_saw'][outside])) > 1e-3*np.max(np.abs(p_on['j_saw'])):
             raise AssertionError("saw: j_saw nonzero outside the mixing radius")
+        # (e) node-dense axis (psi_N = rho^2, as on a FUSE core_profiles grid): inner cumulative-area
+        #     bins hold no quadrature points; the reset must stay finite and still reach q_s
+        x2 = np.linspace(0.0, 1.0, n_sample)**2
+        dense = {k: (dict(v, x=x2, y=np.interp(x2, v['x'], v['y'])) if isinstance(v, dict) else v)
+                 for k, v in common.items()}
+        p_d = mygs.solve_bootstrap(saw_q_s=q_s, saw_dq=dq, **dense)
+        _, q_d, _, _, _, _ = mygs.get_q(npsi=40)
+        print(f"saw dense axis: q0 {q_d[0]:.4f} (q_s {q_s:.4f}), rho_m {p_d['saw_rho_m']:.3f}")
+        if not np.all(np.isfinite(p_d['j_saw'])) or abs(q_d[0] - q_s) > 0.03:
+            raise AssertionError("saw: dense-axis grid reset not finite or q0 not at q_s")
     except Exception as e:
         print(e)
         mp_q.put(None)
