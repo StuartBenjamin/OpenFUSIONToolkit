@@ -2377,6 +2377,12 @@ def run_ITER_torflux_case(fe_order, test_type, mp_q):
             psi_nodes, _ = mygs.get_torflux_map(x_phi,inverse=True)
             results['swb_node_err'] = np.max(np.abs(res_swb['psi_n']-psi_nodes))
             results['swb_jfix_err'] = np.max(np.abs(res_swb['j_fixed']-jfix))/np.max(jfix)
+            # jphi_saw (saw off) is relabelled like jphi_fixed: 0.4 of jfix moved to it changes nothing
+            res_saw = solve_with_bootstrap(mygs,ne,Te,ne,Te,1.5,13.0E6,inductive_jphi=jind,x=x_phi,coord='phi_n',
+                                           jphi_fixed=0.6*jfix,jphi_saw=0.4*jfix,p_fixed=pfix)
+            results['swb_jsaw_err'] = np.max(np.abs(res_saw['j_saw']-0.4*jfix))/np.max(jfix)
+            results['swb_jsaw_total_err'] = (np.max(np.abs(res_saw['total_j_phi']-res_swb['total_j_phi']))
+                                             /np.max(np.abs(res_swb['total_j_phi'])))
             try:
                 solve_with_bootstrap(mygs,ne,Te,ne,Te,1.5,13.0E6,inductive_jphi=jind,x=x_phi,
                                      use_python_solve=True,coord='phi_n')
@@ -2434,6 +2440,8 @@ def test_ITER_torflux_bootstrap(order):
     assert results['swb_node_err'] < 1.E-12
     assert results['jfix_err'] < 1.E-6
     assert results['swb_jfix_err'] < 1.E-6
+    assert results['swb_jsaw_err'] < 1.E-6
+    assert results['swb_jsaw_total_err'] < 1.E-3
     assert results['python_rejected']
 
 # -----------------------------------------------------------------------
