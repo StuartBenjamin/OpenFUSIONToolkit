@@ -579,13 +579,14 @@ ELSE
   IF(.NOT.ASSOCIATED(self%j_BS_last)) ALLOCATE(self%j_BS_last(0:self%npsi))
   self%j_BS_last = j_BS
 END IF
-!--- 3. Apply edge taper to j_BS, jphi_ind and jphi_fixed (jphi_fixed first converted to mu0*A/m²).
+!--- 3. Apply edge taper to j_BS, jphi_ind, jphi_fixed and j_saw_in (the last two first converted to mu0*A/m²).
 !   self%j_BS_last caches the un-tapered j_BS so freeze comparisons track physics.
 !   taper_edge_psi0 is in standard convention (0=axis,1=LCFS);
 !   threshold in OFT convention (0=LCFS,1=axis) is (1 - taper_edge_psi0).
 ALLOCATE(jphi_ind(0:self%npsi))
 jphi_ind = [self%j0, self%jphi]
 jphi_fixed = jphi_fixed * mu0
+j_saw_in = j_saw_in * mu0
 IF (self%boot_ops%taper_edge_jBS) THEN
   CALL apply_edge_taper(self%npsi+1, [0.0_r8, self%x], j_BS, &
                         1.0_r8 - self%boot_ops%taper_edge_psi0, &
