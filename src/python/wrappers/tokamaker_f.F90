@@ -98,7 +98,7 @@ TYPE, BIND(C) :: tokamaker_boot_ops_type
   REAL(c_double)  :: saw_tol = 1.d-4              !< Freeze threshold on rel. change in j_saw
   REAL(c_double)  :: saw_relax = 1.d0             !< Under-relaxation of j_saw
   REAL(c_double)  :: saw_ramp = 1.d-2             !< Reset weight ramp in q deficit (0 = hard trigger)
-  INTEGER(c_int)  :: saw_rule = 1                 !< Dip setting rho_s: 1 outermost, 2 innermost, 3 outermost deeper than saw_ramp, 4 depth-weighted blend
+  INTEGER(c_int)  :: saw_rule = 2                 !< Reset rule: 1 fuse (axis to rho_m), 2 local (each dip, two-sided)
 END TYPE tokamaker_boot_ops_type
 !---------------------------------------------------------------------------------
 !> TokaMaker wrapper object for Python API
@@ -676,8 +676,8 @@ END SUBROUTINE tokamaker_get_boot_ops
 !! n_raw is the size of j_bs_raw and jdotb_bs_raw (0 if not allocated).  The two sizes may differ.
 !---------------------------------------------------------------------------------
 SUBROUTINE tokamaker_get_boot_profs(tMaker_equil_ptr,n,psi_n_ptr,total_j_phi_ptr, &
-    j_bs_final_ptr,j_ind_final_ptr,jphi_fixed_ptr,j_saw_ptr,saw_rho_m,saw_n_dips,n_raw,j_bs_raw_ptr, &
-    jdotb_bs_raw_ptr,error_str) BIND(C,NAME="tokamaker_get_boot_profs")
+    j_bs_final_ptr,j_ind_final_ptr,jphi_fixed_ptr,j_saw_ptr,saw_rho_m,saw_rho_out,saw_n_dips,n_raw, &
+    j_bs_raw_ptr,jdotb_bs_raw_ptr,error_str) BIND(C,NAME="tokamaker_get_boot_profs")
 TYPE(c_ptr), VALUE, INTENT(in) :: tMaker_equil_ptr !< Pointer to TokaMaker equilibrium object
 INTEGER(c_int), INTENT(out) :: n !< Size of total_j_phi, psi_n, j_bs_final, j_ind_final arrays (0 if not allocated)
 TYPE(c_ptr), INTENT(out) :: psi_n_ptr !< Pointer to psi_n array
@@ -686,8 +686,9 @@ TYPE(c_ptr), INTENT(out) :: j_bs_final_ptr !< Pointer to j_bs_final array
 TYPE(c_ptr), INTENT(out) :: j_ind_final_ptr !< Pointer to j_ind_final array
 TYPE(c_ptr), INTENT(out) :: jphi_fixed_ptr !< Pointer to jphi_fixed array (c_null_ptr if not allocated)
 TYPE(c_ptr), INTENT(out) :: j_saw_ptr !< Pointer to j_saw array (c_null_ptr if not allocated)
-REAL(c_double), INTENT(out) :: saw_rho_m !< Mixing radius of the last sawtooth reset (0 = none)
-INTEGER(c_int), INTENT(out) :: saw_n_dips !< Number of q < q_s regions at the last reset
+REAL(c_double), INTENT(out) :: saw_rho_m !< Sawtooth radius at the last reset (0 = none)
+REAL(c_double), INTENT(out) :: saw_rho_out !< Outer end of the last reset (0 = none)
+INTEGER(c_int), INTENT(out) :: saw_n_dips !< Regions reset at the last reset
 INTEGER(c_int), INTENT(out) :: n_raw !< Size of j_bs_raw array (0 if not allocated)
 TYPE(c_ptr), INTENT(out) :: j_bs_raw_ptr !< Pointer to j_bs_raw array (c_null_ptr if not allocated)
 TYPE(c_ptr), INTENT(out) :: jdotb_bs_raw_ptr !< Pointer to jdotb_bs_raw array (c_null_ptr if not allocated)
@@ -705,6 +706,7 @@ TYPE IS (jphi_bs_flux_func)
   jphi_fixed_ptr = c_null_ptr
   j_saw_ptr = c_null_ptr
   saw_rho_m = I%boot_profs%saw_rho_m
+  saw_rho_out = I%boot_profs%saw_rho_out
   saw_n_dips = I%boot_profs%saw_n_dips
   j_bs_raw_ptr = c_null_ptr
   jdotb_bs_raw_ptr = c_null_ptr
@@ -729,9 +731,9 @@ END SELECT
 END SUBROUTINE tokamaker_get_boot_profs
 !---------------------------------------------------------------------------------
 !> 1-D sawtooth q reset (@ref grad_shaf_bootstrap::saw_reset_1d) on given profiles, axis first.
-!! scal = [rho_s, rho_m, n_dips, w]
+!! scal = [rho_s, rho_m, n_dips, w, rho_out]
 !---------------------------------------------------------------------------------
-SUBROUTINE tokamaker_saw_reset_1d(n,rho,q,itor,area,c1,q_s,dq,ramp,rule,q_new,dj,scal) &
+SUBROUTINE tokamaker_saw_reset_1d(n,rho,q,itor,area,c1,q_s,dq,ramp,rule,q_new,dj,wr,scal) &
     BIND(C,NAME="tokamaker_saw_reset_1d")
 INTEGER(c_int), VALUE, INTENT(in) :: n !< Number of points
 REAL(c_double), INTENT(in) :: rho(n) !< Radius, ascending from the axis
@@ -742,12 +744,13 @@ REAL(c_double), INTENT(in) :: c1(n) !< d(jtor)/d(jphi)
 REAL(c_double), VALUE, INTENT(in) :: q_s !< Reset q on axis
 REAL(c_double), VALUE, INTENT(in) :: dq !< Mixing radius offset
 REAL(c_double), VALUE, INTENT(in) :: ramp !< Trigger ramp
-INTEGER(c_int), VALUE, INTENT(in) :: rule !< Dip rule
+INTEGER(c_int), VALUE, INTENT(in) :: rule !< Reset rule (1 fuse, 2 local)
 REAL(c_double), INTENT(out) :: q_new(n) !< Reset q
 REAL(c_double), INTENT(out) :: dj(n) !< Reset current (jphi units of itor/area)
-REAL(c_double), INTENT(out) :: scal(4) !< rho_s, rho_m, n_dips, w
+REAL(c_double), INTENT(out) :: wr(n) !< Per-node reset weight
+REAL(c_double), INTENT(out) :: scal(5) !< rho_s, rho_m, n_dips, w, rho_out
 INTEGER(i4) :: n_dips
-CALL saw_reset_1d(n,rho,q,itor,area,c1,q_s,dq,ramp,rule,q_new,dj,scal(1),scal(2),n_dips,scal(4))
+CALL saw_reset_1d(n,rho,q,itor,area,c1,q_s,dq,ramp,rule,q_new,dj,wr,scal(1),scal(2),scal(5),n_dips,scal(4))
 scal(3) = REAL(n_dips,8)
 END SUBROUTINE tokamaker_saw_reset_1d
 !---------------------------------------------------------------------------------

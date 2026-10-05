@@ -877,12 +877,13 @@ class TokaMaker():
         @param taper_edge_jBS Smoothly taper toroidal current (inductive, bootstrap and fixed) to zero at the plasma edge. (Internal default: False)
         @param taper_edge_psi0 psi_N (standard: 0=axis, 1=LCFS) where the taper begins. (Internal default: 0.999)
         @param taper_edge_shape Taper shape: 1=cos²/Hann, 2=quintic smoothstep, 3=cubic power. (Internal default: 2)
-        @param saw_q_s Sawtooth reset: q on axis of the monotone reset of the base current's q; 0 = off. (Internal default: 0)
-        @param saw_dq Reset mixing radius where the base q first reaches saw_q_s + saw_dq beyond the dip. (Internal default: 0.03)
+        @param saw_q_s Sawtooth reset: q floor of the reset of the base current's q; 0 = off. (Internal default: 0)
+        @param saw_dq Reset regions end where the base q crosses saw_q_s + saw_dq. (Internal default: 0.03)
         @param saw_tol Threshold on relative change in j_saw to freeze it. (Internal default: 1e-4)
         @param saw_relax Under-relaxation of the j_saw update. (Internal default: 1)
         @param saw_ramp Reset weight ramps over this q deficit below saw_q_s; 0 = hard trigger. (Internal default: 0.01)
-        @param saw_rule Dip that sets the reset: 1 outermost, 2 innermost, 3 outermost deeper than saw_ramp, 4 depth-weighted blend of all dips (continuous). (Internal default: 1)
+        @param saw_rule Reset rule: 1 = fuse (FUSE's saw_crash!: q reset from the axis out to the sawtooth radius);
+          2 = local (each dip below saw_q_s raised about its q minimum, current moved only inside it). (Internal default: 2)
         '''
         if self._tMaker_equil is None:
             raise ValueError("Equilibrium object is `None`")
@@ -896,7 +897,7 @@ class TokaMaker():
         `jphi-split-bootstrap` current profile.
 
         @result Dictionary with keys `'psi_n'`, `'total_j_phi'`, `'j_bs_final'`, `'j_ind_final'`
-          and (when available) `'jphi_fixed'`, `'j_saw'`, `'saw_rho_m'`, `'saw_n_dips'`, `'j_bs_raw'`.  Returns `None` if no profiles have been computed.
+          and (when available) `'jphi_fixed'`, `'j_saw'`, `'saw_rho_m'`, `'saw_rho_out'`, `'saw_n_dips'`, `'j_bs_raw'`.  Returns `None` if no profiles have been computed.
           `'psi_n'` is in standard convention (0=axis, 1=LCFS). Current densities are in A/m².
         '''
         if self._tMaker_equil is None:
@@ -2400,9 +2401,9 @@ class TokaMaker():
         @param taper_edge_psi0 \f$\hat{\psi_n}\f$ (0=axis, 1=LCFS) where the taper begins (default: 0.999)
         @param taper_edge_shape Taper shape: 1=cos\f$^2\f$/Hann, 2=quintic smoothstep, 3=cubic power
           (default: 2)
-        @param saw_q_s Sawtooth reset q on axis; 0 = off (default: 0, also when omitted after a call that set it). The q of
-          \f$\alpha j_{ind} + j_{BS} + j_{fixed} + j_{saw,in}\f$ in the traced geometry is reset inside the mixing
-          radius to a monotone profile (q_s on axis); the Ip-neutral current that does this is added to ``j_saw``
+        @param saw_q_s Sawtooth reset q floor; 0 = off (default: 0, also when omitted after a call that set it). The q of
+          \f$\alpha j_{ind} + j_{BS} + j_{fixed} + j_{saw,in}\f$ in the traced geometry is reset where it dips
+          below q_s (``saw_rule``); the Ip-neutral current that does this is added to ``j_saw``
         @param saw_dq, saw_tol, saw_relax, saw_ramp, saw_rule See ``set_boot_ops()``
 
         @result Dictionary with 1-D numpy array values (A/m² unless noted). All current densities, inputs
@@ -2414,7 +2415,8 @@ class TokaMaker():
           - ``'j_bs_final'`` Bootstrap current density (optionally isolated / parametrised / tapered) [A/m²]
           - ``'jphi_fixed'`` Fixed current density ``jphi_fixed_prof`` (optionally tapered, zero if not set) [A/m²]
           - ``'j_saw'`` Sawtooth current: ``jphi_saw_prof`` (optionally tapered) plus the reset current [A/m²]
-          - ``'saw_rho_m'``, ``'saw_n_dips'`` Mixing radius (\f$\rho_{tor,N}\f$) and number of q < q_s regions of the last reset
+          - ``'saw_rho_m'``, ``'saw_rho_out'``, ``'saw_n_dips'`` Sawtooth radius (q_s + dq crossing beyond the outermost
+            q < q_s, \f$\rho_{tor,N}\f$), outer end of the reset and number of regions reset, at the last reset
           - ``'j_bs_raw'`` Bootstrap current density from the Redl PoP 2021 formula,
             \f$\langle j_{BS} \cdot B \rangle F \langle 1/R \rangle/\langle B^2 \rangle + P'(\langle R \rangle - F^2 \langle 1/R \rangle/\langle B^2 \rangle)\f$ [A/m²]
           - ``'jdotb_bs_raw'`` The Redl \f$\langle j_{BS} \cdot B \rangle\f$ behind ``'j_bs_raw'`` [T A/m²]
@@ -3067,12 +3069,13 @@ class TokaMaker_equilibrium():
         @param taper_edge_jBS Smoothly taper toroidal current (inductive, bootstrap and fixed) to zero at the plasma edge. (Internal default: False)
         @param taper_edge_psi0 psi_N (standard: 0=axis, 1=LCFS) where the taper begins. (Internal default: 0.999)
         @param taper_edge_shape Taper shape: 1=cos²/Hann, 2=quintic smoothstep, 3=cubic power. (Internal default: 2)
-        @param saw_q_s Sawtooth reset q on axis; 0 = off. (Internal default: 0)
-        @param saw_dq Reset mixing radius where the base q first reaches saw_q_s + saw_dq beyond the dip. (Internal default: 0.03)
+        @param saw_q_s Sawtooth reset q floor; 0 = off. (Internal default: 0)
+        @param saw_dq Reset regions end where the base q crosses saw_q_s + saw_dq. (Internal default: 0.03)
         @param saw_tol Threshold on relative change in j_saw to freeze it. (Internal default: 1e-4)
         @param saw_relax Under-relaxation of the j_saw update. (Internal default: 1)
         @param saw_ramp Reset weight ramps over this q deficit below saw_q_s; 0 = hard trigger. (Internal default: 0.01)
-        @param saw_rule Dip that sets the reset: 1 outermost, 2 innermost, 3 outermost deeper than saw_ramp, 4 depth-weighted blend of all dips (continuous). (Internal default: 1)
+        @param saw_rule Reset rule: 1 = fuse (FUSE's saw_crash!: q reset from the axis out to the sawtooth radius);
+          2 = local (each dip below saw_q_s raised about its q minimum, current moved only inside it). (Internal default: 2)
         '''
         # On first call, seed the shadow dict from the Fortran-type defaults in grad_shaf.F90
         if self._boot_ops is None:
@@ -3090,7 +3093,7 @@ class TokaMaker_equilibrium():
                 'saw_tol': 1.0e-4,
                 'saw_relax': 1.0,
                 'saw_ramp': 0.01,
-                'saw_rule': 1,
+                'saw_rule': 2,
             }
         # Override only the explicitly provided kwargs
         if isolate_edge_jBS is not None:
@@ -3109,15 +3112,15 @@ class TokaMaker_equilibrium():
             self._boot_ops['taper_edge_psi0'] = float(taper_edge_psi0)
         if taper_edge_shape is not None:
             self._boot_ops['taper_edge_shape'] = int(taper_edge_shape)
-        for _k, _d in (('saw_q_s', 0.0), ('saw_dq', 0.03), ('saw_tol', 1.0e-4), ('saw_relax', 1.0), ('saw_ramp', 0.01), ('saw_rule', 1)):
+        for _k, _d in (('saw_q_s', 0.0), ('saw_dq', 0.03), ('saw_tol', 1.0e-4), ('saw_relax', 1.0), ('saw_ramp', 0.01), ('saw_rule', 2)):
             self._boot_ops.setdefault(_k, _d)
         for _k, _v, _t in (('saw_q_s', saw_q_s, float), ('saw_dq', saw_dq, float), ('saw_tol', saw_tol, float),
                            ('saw_relax', saw_relax, float), ('saw_ramp', saw_ramp, float), ('saw_rule', saw_rule, int)):
             if _v is not None:
                 self._boot_ops[_k] = _t(_v)
         if self._boot_ops['saw_q_s'] < 0.0 or self._boot_ops['saw_dq'] <= 0.0 or not (0.0 < self._boot_ops['saw_relax'] <= 1.0) \
-                or self._boot_ops['saw_ramp'] < 0.0 or self._boot_ops['saw_rule'] not in (1, 2, 3, 4):
-            raise ValueError("saw options: need saw_q_s >= 0, saw_dq > 0, 0 < saw_relax <= 1, saw_ramp >= 0, saw_rule in (1, 2, 3, 4)")
+                or self._boot_ops['saw_ramp'] < 0.0 or self._boot_ops['saw_rule'] not in (1, 2):
+            raise ValueError("saw options: need saw_q_s >= 0, saw_dq > 0, 0 < saw_relax <= 1, saw_ramp >= 0, saw_rule in (1, 2)")
         # Build the ctypes struct from the merged shadow state and send to Fortran
         bops = tokamaker_boot_ops_struct()
         bops.isolate_edge_jBS = self._boot_ops['isolate_edge_jBS']
@@ -3140,7 +3143,7 @@ class TokaMaker_equilibrium():
         `jphi-split-bootstrap` current profile.
 
         @result Dictionary with keys `'psi_n'`, `'total_j_phi'`, `'j_bs_final'`, `'j_ind_final'`
-          and (when available) `'jphi_fixed'`, `'j_saw'`, `'saw_rho_m'`, `'saw_n_dips'`, `'j_bs_raw'`, `'jdotb_bs_raw'`.  Returns `None` if no
+          and (when available) `'jphi_fixed'`, `'j_saw'`, `'saw_rho_m'`, `'saw_rho_out'`, `'saw_n_dips'`, `'j_bs_raw'`, `'jdotb_bs_raw'`.  Returns `None` if no
           profiles have been computed.  All arrays are 1-D numpy arrays of length *npsi*.  `'psi_n'` is
           in standard convention (0 = axis, 1 = LCFS).  Current densities are TokaMaker
           \f$j_\phi = \langle j_\phi \rangle\f$ in A/m² (see doc_tokamaker_current_conventions);
@@ -3155,6 +3158,7 @@ class TokaMaker_equilibrium():
         jphi_fixed_ptr = c_double_ptr()
         j_saw_ptr = c_double_ptr()
         saw_rho_m = c_double(0.0)
+        saw_rho_out = c_double(0.0)
         saw_n_dips = c_int(0)
         j_bs_raw_ptr = c_double_ptr()
         jdotb_bs_raw_ptr = c_double_ptr()
@@ -3163,7 +3167,7 @@ class TokaMaker_equilibrium():
             ctypes.byref(n), ctypes.byref(psi_n_ptr),
             ctypes.byref(total_j_phi_ptr), ctypes.byref(j_bs_final_ptr),
             ctypes.byref(j_ind_final_ptr), ctypes.byref(jphi_fixed_ptr),
-            ctypes.byref(j_saw_ptr), ctypes.byref(saw_rho_m), ctypes.byref(saw_n_dips),
+            ctypes.byref(j_saw_ptr), ctypes.byref(saw_rho_m), ctypes.byref(saw_rho_out), ctypes.byref(saw_n_dips),
             ctypes.byref(n_raw), ctypes.byref(j_bs_raw_ptr), ctypes.byref(jdotb_bs_raw_ptr),
             error_string)
         if error_string.value != b'':
@@ -3184,6 +3188,7 @@ class TokaMaker_equilibrium():
             if j_saw_ptr:
                 result['j_saw'] = numpy.ctypeslib.as_array(j_saw_ptr, shape=(n.value,)).copy()
             result['saw_rho_m'] = float(saw_rho_m.value)
+            result['saw_rho_out'] = float(saw_rho_out.value)
             result['saw_n_dips'] = int(saw_n_dips.value)
         if n_raw.value > 0:
             result['j_bs_raw'] = numpy.ctypeslib.as_array(j_bs_raw_ptr, shape=(n_raw.value,)).copy()
