@@ -1,4 +1,4 @@
-'''Sawtooth reset in full ITER SWB solves: an off-axis fixed-current ring makes q W-shaped.
+'''Sawtooth reset in full ITER SWB solves: reversed-shear base, plus axis-peaked fixed current (W-shaped q).
 
 Run from src/tests/physics (ITER_geom.json); writes figures and summary.json to outdir. Per-iteration
 [saw] diagnostics go to stdout (diagnose_bs), so redirect it to a log.
@@ -38,16 +38,18 @@ def solve(label, **kw):
                 n_dips=p.get('saw_n_dips', 0), Ip=float(mygs.get_stats()['Ip']))
 
 
-runs = [solve('base')]
-q_s = float(sys.argv[2]) if len(sys.argv) > 2 else runs[0]['q'][0] + 0.1
-# Ring amplitudes chosen to put an off-axis q minimum near / below q_s
-for amp in (0.0, 3.0e5, 6.0e5):
-    ring = {'x': x, 'y': amp * np.exp(-((x - 0.35) / 0.06)**2)}
-    lab = f'ring{amp:.0e}'
-    if amp > 0:
-        runs.append(solve(lab + '_off', jphi_fixed_prof=dict(ring)))
-    for rule in (1, 2):
-        runs.append(solve(f'{lab}_saw_rule{rule}', jphi_fixed_prof=dict(ring), saw_q_s=q_s, saw_rule=rule,
+runs = [solve('base', saw_q_s=0.0)]
+q0, qmin = runs[0]['q'][0], min(runs[0]['q'])
+# ITER base has reversed shear (off-axis q minimum below q0). q_s between them: an off-axis dip only;
+# an axis-peaked extra current then pulls q0 below q_s too (W-shaped q_base)
+q_s = float(sys.argv[2]) if len(sys.argv) > 2 else 0.5*(q0 + qmin)
+print(f'q0 {q0:.4f}, min q {qmin:.4f}, q_s {q_s:.4f}', flush=True)
+for amp in (0.0, 1.5e5, 3.0e5):
+    core = {'x': x, 'y': amp * np.exp(-(x / 0.12)**2)}
+    lab = f'core{amp:.0e}'
+    runs.append(solve(lab + '_off', jphi_fixed_prof=dict(core), saw_q_s=0.0))
+    for rule in (1, 2, 4):
+        runs.append(solve(f'{lab}_saw_rule{rule}', jphi_fixed_prof=dict(core), saw_q_s=q_s, saw_rule=rule,
                           diagnose_bs=True))
 
 with open(os.path.join(outdir, 'summary.json'), 'w') as fid:
@@ -57,9 +59,9 @@ for r in runs:
     ls = '-' if 'saw' in r['label'] else '--'
     ax[0].plot(r['psi_q'], r['q'], ls=ls, label=r['label'])
     ax[1].plot(r['psi_n'], np.asarray(r['j_saw'])/1e6, ls=ls, label=r['label'])
-ax[0].axhline(q_s, color='r', lw=0.8); ax[0].set_xlabel('psi_N'); ax[0].set_ylabel('q'); ax[0].set_ylim(0.8, 3.0)
+ax[0].axhline(q_s, color='r', lw=0.8); ax[0].set_xlabel('psi_N'); ax[0].set_ylabel('q'); ax[0].set_ylim(0.8, 2.5); ax[0].set_xlim(0, 0.8)
 ax[1].set_xlabel('psi_N'); ax[1].set_ylabel('j_saw [MA/m^2]')
 for a in ax: a.legend(fontsize=6)
 fig.suptitle(f'ITER SWB with saw reset, q_s = {q_s:.3f}'); fig.tight_layout()
-fig.savefig(os.path.join(outdir, 'b2_iter_rings.png'), dpi=110)
+fig.savefig(os.path.join(outdir, 'b2_iter_core_current.png'), dpi=110)
 print('done')

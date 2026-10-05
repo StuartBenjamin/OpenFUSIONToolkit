@@ -2400,7 +2400,7 @@ class TokaMaker():
         @param taper_edge_psi0 \f$\hat{\psi_n}\f$ (0=axis, 1=LCFS) where the taper begins (default: 0.999)
         @param taper_edge_shape Taper shape: 1=cos\f$^2\f$/Hann, 2=quintic smoothstep, 3=cubic power
           (default: 2)
-        @param saw_q_s Sawtooth reset q on axis; 0 = off (default: 0). The q of
+        @param saw_q_s Sawtooth reset q on axis; 0 = off (default: 0, also when omitted after a call that set it). The q of
           \f$\alpha j_{ind} + j_{BS} + j_{fixed} + j_{saw,in}\f$ in the traced geometry is reset inside the mixing
           radius to a monotone profile (q_s on axis); the Ip-neutral current that does this is added to ``j_saw``
         @param saw_dq, saw_tol, saw_relax, saw_ramp, saw_rule See ``set_boot_ops()``
@@ -2506,6 +2506,8 @@ class TokaMaker():
             pp_prof=pp_prof,
             foffset=F0,
         )
+        # The sawtooth reset is per solve, like jphi_fixed: off unless saw_q_s is passed
+        kwargs.setdefault('saw_q_s', 0.0)
         self.set_boot_ops(**kwargs) # Must come after set_profiles
         self.solve()
 

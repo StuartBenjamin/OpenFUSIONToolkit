@@ -1984,7 +1984,8 @@ def run_ITER_bootstrap_saw_internal(mesh_resolution, fe_order, mp_q):
         bump = 1.0e5 * np.exp(-((psi_sample - 0.2) / 0.1)**2)
         p_fix = mygs.solve_bootstrap(jphi_fixed_prof={'x': psi_sample, 'y': bump}, **common)
         p_saw = mygs.solve_bootstrap(jphi_saw_prof={'x': psi_sample, 'y': bump}, **common)
-        if not close(p_saw['total_j_phi'], p_fix['total_j_phi'], 1e-6):
+        # Both converge j_BS to djBS_tol (1e-4) and may stop an iteration apart
+        if not close(p_saw['total_j_phi'], p_fix['total_j_phi'], 2e-4):
             raise AssertionError("jphi_saw_prof (saw off) total differs from the same jphi_fixed_prof")
         if not close(p_saw['j_saw'], np.interp(p_saw['psi_n'], psi_sample, bump), 1e-6) or np.any(p_saw['jphi_fixed'] != 0.0):
             raise AssertionError("j_saw / jphi_fixed with jphi_saw_prof (saw off) wrong")
@@ -1995,7 +1996,7 @@ def run_ITER_bootstrap_saw_internal(mesh_resolution, fe_order, mp_q):
         if np.any(p_low['j_saw'] != 0.0) or p_low['saw_n_dips'] != 0:
             raise AssertionError("saw_q_s below min q changed j_saw")
         for key in ('total_j_phi', 'j_ind_final', 'j_bs_final'):
-            if not close(p_low[key], base[key], 1e-5):
+            if not close(p_low[key], base[key], 2e-4):
                 raise AssertionError(f"saw_q_s below min q: '{key}' differs from saw off")
         # (b) q_s above the unconstrained q0: q0 -> q_s, monotone inside rho_m, Ip on target
         q_s, dq = float(q_base[0]) + 0.2, 0.03
