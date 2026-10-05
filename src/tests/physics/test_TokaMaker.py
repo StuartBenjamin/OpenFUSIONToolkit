@@ -1533,7 +1533,8 @@ def test_Redl_jBS(order):
 #============================================================================
 # Internal bootstrap test (ITER-based)
 #============================================================================
-def run_ITER_bootstrap_case_internal(mesh_resolution, fe_order, mp_q):
+def _ITER_bootstrap_internal_setup(mesh_resolution, fe_order):
+    '''ITER mesh, H-mode profiles and an initial no-bootstrap solve; None on failure'''
     from OpenFUSIONToolkit.TokaMaker.bootstrap import Hmode_profiles
 
     # --- Mesh creation (same as run_ITER_case) ---
@@ -1574,8 +1575,7 @@ def run_ITER_bootstrap_case_internal(mesh_resolution, fe_order, mp_q):
             create_mesh()
         except Exception as e:
             print(e)
-            mp_q.put(None)
-            return
+            return None
 
     # --- Kinetic and current profiles (match ITER_Hmode_bootstrap_ex.py) ---
     n_sample = 257
@@ -1633,8 +1633,20 @@ def run_ITER_bootstrap_case_internal(mesh_resolution, fe_order, mp_q):
         mygs.init_psi(6.3, 0.5, 2.0, 1.4, 0.0)
         mygs.solve()
     except ValueError:
+        return None
+    return dict(mygs=mygs, myOFT=myOFT, psi_sample=psi_sample, n_sample=n_sample, Ip_target=Ip_target,
+                Zeff_val=Zeff_val, ne=ne, Te=Te, ni=ni, Ti=Ti, inductive_jphi=inductive_jphi)
+
+
+
+def run_ITER_bootstrap_case_internal(mesh_resolution, fe_order, mp_q):
+    setup = _ITER_bootstrap_internal_setup(mesh_resolution, fe_order)
+    if setup is None:
         mp_q.put(None)
         return
+    mygs, myOFT, psi_sample, n_sample, Ip_target, Zeff_val, ne, Te, ni, Ti, inductive_jphi = (
+        setup[k] for k in ('mygs', 'myOFT', 'psi_sample', 'n_sample', 'Ip_target', 'Zeff_val',
+                           'ne', 'Te', 'ni', 'Ti', 'inductive_jphi'))
 
     # --- Bootstrap solve ---
     try:
@@ -1953,6 +1965,128 @@ ITER_bootstrap_internal_eq_dict = {
 def test_ITER_bootstrap_internal(order):
     results = mp_run(run_ITER_bootstrap_case_internal, (1.0, order), timeout=300)
     assert validate_dict(results, ITER_bootstrap_internal_eq_dict)
+
+
+def run_ITER_bootstrap_saw_internal(mesh_resolution, fe_order, mp_q):
+    '''Sawtooth reset (saw_q_s) in the internal bootstrap solve'''
+    setup = _ITER_bootstrap_internal_setup(mesh_resolution, fe_order)
+    if setup is None:
+        mp_q.put(None)
+        return
+    mygs, psi_sample, n_sample, Ip_target = (setup[k] for k in ('mygs', 'psi_sample', 'n_sample', 'Ip_target'))
+    common = dict(
+        ffp_prof={'type': 'jphi-split-bootstrap', 'x': psi_sample, 'y': setup['inductive_jphi']},
+        te_prof={'type': 'linterp', 'x': psi_sample, 'y': setup['Te'] / 1e3},
+        ne_prof={'type': 'linterp', 'x': psi_sample, 'y': setup['ne']},
+        ti_prof={'type': 'linterp', 'x': psi_sample, 'y': setup['Ti'] / 1e3},
+        ni_prof={'type': 'linterp', 'x': psi_sample, 'y': setup['ni']},
+        Zeff=setup['Zeff_val'], Ip_target=Ip_target, scale_jBS=1.0,
+    )
+
+    def close(a, b, rtol):
+        return np.allclose(a, b, rtol=rtol, atol=rtol*np.max(np.abs(b)))
+
+    def sum_ok(p):
+        return close(p['total_j_phi'], p['j_ind_final'] + p['j_bs_final'] + p['jphi_fixed'] + p['j_saw'], 1e-10)
+
+    try:
+        base = mygs.solve_bootstrap(**common)
+        _, q_base, _, _, _, _ = mygs.get_q(npsi=40)
+        # (a) an input jphi_saw_prof with the reset off acts as a fixed current
+        bump = 1.0e5 * np.exp(-((psi_sample - 0.2) / 0.1)**2)
+        p_fix = mygs.solve_bootstrap(jphi_fixed_prof={'x': psi_sample, 'y': bump}, **common)
+        p_saw = mygs.solve_bootstrap(jphi_saw_prof={'x': psi_sample, 'y': bump}, **common)
+        # Both converge j_BS to djBS_tol (1e-4) and may stop an iteration apart
+        if not close(p_saw['total_j_phi'], p_fix['total_j_phi'], 2e-4):
+            raise AssertionError("jphi_saw_prof (saw off) total differs from the same jphi_fixed_prof")
+        if not close(p_saw['j_saw'], np.interp(p_saw['psi_n'], psi_sample, bump), 1e-6) or np.any(p_saw['jphi_fixed'] != 0.0):
+            raise AssertionError("j_saw / jphi_fixed with jphi_saw_prof (saw off) wrong")
+        if not (sum_ok(p_fix) and sum_ok(p_saw)):
+            raise AssertionError("total_j_phi != j_ind + j_bs + jphi_fixed + j_saw")
+        # (c, d) q_s below min q: no reset, same result as saw off (alpha through the cumulative integral)
+        p_low = mygs.solve_bootstrap(saw_q_s=0.5*np.min(q_base), **common)
+        if np.any(p_low['j_saw'] != 0.0) or p_low['saw_n_dips'] != 0:
+            raise AssertionError("saw_q_s below min q changed j_saw")
+        for key in ('total_j_phi', 'j_ind_final', 'j_bs_final'):
+            if not close(p_low[key], base[key], 2e-4):
+                raise AssertionError(f"saw_q_s below min q: '{key}' differs from saw off")
+        # (b) q_s above the unconstrained q0: q0 -> q_s, monotone inside rho_m, Ip on target
+        q_s, dq = float(q_base[0]) + 0.2, 0.03
+        p_on = mygs.solve_bootstrap(saw_q_s=q_s, saw_dq=dq, diagnose_bs=False, **common)
+        psi_q, q_on, _, _, _, _ = mygs.get_q(npsi=40)
+        print(f"saw: q0 base {q_base[0]:.4f} -> {q_on[0]:.4f} (q_s {q_s:.4f}), rho_m {p_on['saw_rho_m']:.3f}, "
+              f"n_dips {p_on['saw_n_dips']}, max|j_saw| {np.max(np.abs(p_on['j_saw'])):.3e}")
+        if abs(q_on[0] - q_s) > 0.03:
+            raise AssertionError(f"saw: q0 {q_on[0]:.4f} not at q_s {q_s:.4f}")
+        inner = q_on < q_s + dq
+        inner[np.argmax(~inner):] = False
+        if np.any(np.diff(q_on[inner]) < -2e-3):
+            raise AssertionError("saw: q not monotone inside the mixing radius")
+        ip = mygs.get_stats()['Ip']
+        if abs(ip/Ip_target - 1.0) > 1e-3:
+            raise AssertionError(f"saw: Ip {ip:.6e} off target {Ip_target:.6e}")
+        if not sum_ok(p_on) or p_on['saw_n_dips'] < 1 or not (0.0 < p_on['saw_rho_m'] < 1.0):
+            raise AssertionError("saw: profile sum / rho_m / n_dips wrong")
+        # j_saw vanishes outside rho_m (rho_tor_norm from int q dpsi)
+        phi = np.concatenate(([0.0], np.cumsum(0.5*(q_on[1:] + q_on[:-1])*np.diff(psi_q))))
+        rho_of_psi = np.sqrt(np.interp(p_on['psi_n'], psi_q, phi/phi[-1]))
+        outside = rho_of_psi > p_on['saw_rho_m'] + 0.05
+        if np.max(np.abs(p_on['j_saw'][outside])) > 1e-3*np.max(np.abs(p_on['j_saw'])):
+            raise AssertionError("saw: j_saw nonzero outside the mixing radius")
+    except Exception as e:
+        print(e)
+        mp_q.put(None)
+        return
+    mp_q.put([{'saw_checks': 1.0}])
+    oftpy_dump_cov()
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("order", (2,))
+def test_ITER_bootstrap_saw_internal(order):
+    results = mp_run(run_ITER_bootstrap_saw_internal, (1.0, order), timeout=600)
+    assert validate_dict(results, {'saw_checks': 1.0})
+
+
+def test_saw_reset_1d():
+    '''1-D sawtooth reset on a cylinder (I = rho^2/q, A = rho^2): single and double dips, rules'''
+    from OpenFUSIONToolkit.TokaMaker.bootstrap import _saw_reset_1d
+    rho = np.linspace(0.0, 1.0, 201)
+    A, c1 = rho**2, np.ones_like(rho)
+    q_s, dq = 1.025, 0.03
+    # Single on-axis dip
+    q = 0.9 + 2.5*rho**2
+    I = A/q
+    q_new, dj, sc = _saw_reset_1d(rho, q, I, A, c1, q_s, dq)
+    assert sc['n_dips'] == 1 and sc['w'] == 1.0
+    assert np.isclose(sc['rho_s'], np.sqrt((q_s - 0.9)/2.5), atol=2e-3)
+    assert np.isclose(sc['rho_m'], np.sqrt((q_s + dq - 0.9)/2.5), atol=2e-3)
+    assert np.isclose(q_new[0], q_s) and np.all(np.diff(q_new) >= -1e-12)
+    jm = np.searchsorted(rho, sc['rho_m'])
+    assert np.all(q_new[jm:] == q[jm:]) and np.all(dj[jm+1:] == 0.0)
+    # Ip-neutral up to the O(h) gradient error at the kink of dI at rho_m (the solver's alpha absorbs it)
+    assert abs(np.trapezoid(dj, A)) < 5e-3*np.trapezoid(np.abs(dj), A)
+    # q above q_s everywhere: no reset
+    q_new2, dj2, sc2 = _saw_reset_1d(rho, q + 0.2, A/(q + 0.2), A, c1, q_s, dq)
+    assert sc2['n_dips'] == 0 and np.all(dj2 == 0.0) and np.all(q_new2 == q + 0.2)
+    # Two dips with the hump between them above q_s + dq: rule 1 mixes past the outer dip, rule 2 stops at the hump
+    q3 = 1.06 + 0.6*rho**2 - 0.12*np.exp(-(rho/0.1)**2) - 0.12*np.exp(-((rho - 0.35)/0.06)**2)
+    out = {r: _saw_reset_1d(rho, q3, A/q3, A, c1, q_s, dq, rule=r) for r in (1, 2)}
+    assert out[1][2]['n_dips'] == 2 and out[2][2]['n_dips'] == 2
+    assert out[2][2]['rho_m'] < 0.25 and out[1][2]['rho_m'] > 0.35
+    assert np.all(np.diff(out[1][0][rho < out[1][2]['rho_m']]) >= -1e-12)
+    # Rule 4 (depth-weighted blend) equals rule 1 when every dip is deeper than the ramp, and stays
+    # continuous as the outer dip crosses q_s (rule 1 jumps from the inner to the outer mixing radius)
+    assert np.allclose(_saw_reset_1d(rho, q3, A/q3, A, c1, q_s, dq, rule=4)[0], out[1][0])
+    bg = 1.06 + 0.6*rho**2 - 0.12*np.exp(-(rho/0.1)**2)
+    norms = {}
+    for rule in (1, 4):
+        nj = []
+        for d in np.linspace(0.104, 0.113, 46):   # outer dip minimum crosses q_s near d = 0.1085
+            qd = bg - d*np.exp(-((rho - 0.35)/0.06)**2)
+            nj.append(np.sqrt(np.trapezoid(_saw_reset_1d(rho, qd, A/qd, A, c1, q_s, dq, rule=rule)[1]**2, A)))
+        norms[rule] = np.abs(np.diff(nj)).max() / np.max(nj)
+    assert norms[1] > 0.5 and norms[4] < 0.05
 
 # -----------------------------------------------------------------------
 # Test: profiles on normalized toroidal flux (coord='phi_n'/'phi_n_relabel')

@@ -894,6 +894,7 @@ def solve_with_bootstrap(mygs,
                          psi_N = None,
                          jphi_fixed = None,
                          p_fixed = None,
+                         jphi_saw = None,
                          **kwargs):
     r'''! Self-consistently compute bootstrap current from H-mode profiles
 
@@ -930,6 +931,8 @@ def solve_with_bootstrap(mygs,
       added to the total without rescaling (internal Fortran solver only)
     @param p_fixed Additional pressure \f$P_{fixed}\f$ [Pa] on `x` (array or profile dict, e.g. fast-ion pressure),
       added to \f$e_C(n_e T_e + n_i T_i)\f$ for the GS pressure but excluded from j_BS (internal Fortran solver only)
+    @param jphi_saw Input sawtooth toroidal current density [A/m$^2$] (array or profile dict), added without rescaling;
+      with `saw_q_s` > 0 the sawtooth reset current is added to it (internal Fortran solver only)
     @result Dictionary with total, bootstrap, inductive, and isolated edge current profiles, all (like the
       `inductive_jphi` and `jphi_fixed` inputs) TokaMaker \f$j_\phi = \langle j_\phi \rangle\f$
       (see doc_tokamaker_current_conventions); the internal solver also returns `'psi_n'`, the
@@ -968,6 +971,7 @@ def solve_with_bootstrap(mygs,
         _ffp  = inductive_jphi if isinstance(inductive_jphi, dict) else _default_profile(inductive_jphi, 'inductive_jphi', x=x)
         _jfix = None if jphi_fixed is None else (jphi_fixed if isinstance(jphi_fixed, dict) else _default_profile(jphi_fixed, 'jphi_fixed', x=x))
         _pfix = None if p_fixed is None else (p_fixed if isinstance(p_fixed, dict) else _default_profile(p_fixed, 'p_fixed', x=x))
+        _jsaw = None if jphi_saw is None else (jphi_saw if isinstance(jphi_saw, dict) else _default_profile(jphi_saw, 'jphi_saw', x=x))
         Zeff_arg = Zeff if isinstance(Zeff, dict) else (_default_profile(Zeff, 'Zeff', x=x) if numpy.ndim(Zeff) > 0 and numpy.size(Zeff) > 1 else float(Zeff))
         _results = mygs.solve_bootstrap(
             ffp_prof=_ffp,
@@ -979,6 +983,7 @@ def solve_with_bootstrap(mygs,
             Ip_target=Ip_target,
             jphi_fixed_prof=_jfix,
             p_fixed_prof=_pfix,
+            jphi_saw_prof=_jsaw,
             scale_jBS=scale_jBS,
             isolate_edge_jBS=isolate_edge_jBS,
             parameterize_jBS=parameterize_jBS,
@@ -992,6 +997,9 @@ def solve_with_bootstrap(mygs,
                     'j_inductive' : _results['j_ind_final'],
                     'isolated_j_BS' : _results['j_bs_final'],
                     'j_fixed' : _results.get('jphi_fixed'),
+                    'j_saw' : _results.get('j_saw'),
+                    'saw_rho_m' : _results.get('saw_rho_m'),
+                    'saw_n_dips' : _results.get('saw_n_dips'),
                     'jdotb_BS' : _results.get('jdotb_bs_raw'),
                     'scale_j0' : 1.0,
                     'scale_Ip' : 1.0}
@@ -1003,6 +1011,8 @@ def solve_with_bootstrap(mygs,
             raise NotImplementedError("jphi_fixed is only supported by the internal Fortran solver (use_python_solve=False)")
         if p_fixed is not None:
             raise NotImplementedError("p_fixed is only supported by the internal Fortran solver (use_python_solve=False)")
+        if jphi_saw is not None or kwargs.get('saw_q_s'):
+            raise NotImplementedError("jphi_saw / saw_q_s are only supported by the internal Fortran solver (use_python_solve=False)")
         F0_local = kwargs.get('F0_local', None)
 
     warn(
@@ -1309,3 +1319,16 @@ def solve_with_bootstrap(mygs,
                 'scale_Ip' : final_scale_Ip}
 
     return results
+
+
+def _saw_reset_1d(rho, q, itor, area, c1, q_s, dq=0.03, ramp=0.01, rule=1):
+    r'''! Fortran 1-D sawtooth q reset (grad_shaf_bootstrap::saw_reset_1d) on given profiles, axis first
+
+    @result (q_new, dj, dict(rho_s, rho_m, n_dips, w)); dj in the units of itor/area divided by c1
+    '''
+    from ._interface import tokamaker_saw_reset_1d
+    arrs = [numpy.ascontiguousarray(a, dtype=numpy.float64) for a in (rho, q, itor, area, c1)]
+    n = arrs[0].size
+    q_new, dj, scal = numpy.zeros(n), numpy.zeros(n), numpy.zeros(4)
+    tokamaker_saw_reset_1d(n, *arrs, float(q_s), float(dq), float(ramp), int(rule), q_new, dj, scal)
+    return q_new, dj, {'rho_s': scal[0], 'rho_m': scal[1], 'n_dips': int(scal[2]), 'w': scal[3]}
