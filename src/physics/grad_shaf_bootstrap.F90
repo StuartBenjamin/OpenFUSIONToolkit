@@ -786,7 +786,9 @@ END SUBROUTINE jphi_bs_update
 !!
 !! q_base = q_eq*I_eq/I_base is the q that the base current implies in the traced geometry
 !! (q*I is geometric). rho = sqrt(Phi_N), Phi from int q_eq dpsi. @ref saw_reset_1d gives the
-!! reset; dI/dA is mapped back to jphi with the linear part of eval_jtor_imas.
+!! reset on the nodes whose cumulative-area bin holds at least a quarter of the mean bin area (a
+!! node-dense axis, e.g. psi_N ~ rho^2, leaves inner bins without quadrature points), interpolated
+!! in rho to every node; dI/dA is mapped back to jphi with the linear part of eval_jtor_imas.
 !---------------------------------------------------------------------------------
 SUBROUTINE saw_redistribute(self, gseq, R_spline, xn, psi_qg, q_g, I_base, I_eq, area, dj)
 CLASS(jphi_bs_flux_func), INTENT(inout) :: self
@@ -799,8 +801,9 @@ REAL(r8), INTENT(in) :: I_base(:) !< Enclosed base current at each node (gs_flux
 REAL(r8), INTENT(in) :: I_eq(:) !< Enclosed current of the traced equilibrium [n]
 REAL(r8), INTENT(in) :: area(:) !< Enclosed area [n]
 REAL(r8), INTENT(out) :: dj(:) !< Reset current [n]
-INTEGER(i4) :: n, i, k, n_dips, ng
-REAL(r8) :: rho_s, rho_m, w
+INTEGER(i4) :: n, i, k, n_dips, ng, nk
+INTEGER(i4), ALLOCATABLE :: kk(:)
+REAL(r8) :: rho_s, rho_m, w, dAmin, alast
 REAL(r8), ALLOCATABLE :: q_eq(:), c1(:), rho(:), qb(:), Ib(:), Ar(:), qn(:), djr(:), r(:), phi(:)
 TYPE(spline_type) :: q_spl
 n = SIZE(xn)
@@ -821,22 +824,47 @@ DO i = 1, n
   c1(i) = R_spline%f(3)/R_spline%f(2)**2
   Ib(i) = I_base(k)
   Ar(i) = area(k)
-  r(i) = 0.0_r8
-  IF(ABS(I_base(k)) > 0.0_r8 .AND. Ar(i) > 0.0_r8) r(i) = I_eq(k)/I_base(k)
 END DO
-IF(r(1) == 0.0_r8) r(1) = r(2)
-qb = q_eq*r
 !---rho_tor_norm from Phi = int q dpsi_N, from the innermost node (its inner piece as a rectangle)
 phi(1) = q_eq(1)*(1.0_r8 - xn(n))
 DO i = 2, n
   phi(i) = phi(i-1) + 0.5_r8*(q_eq(i) + q_eq(i-1))*(xn(n+2-i) - xn(n+1-i))
 END DO
 rho = SQRT(phi/phi(n))
-CALL saw_reset_1d(n, rho, qb, Ib, Ar, c1, self%boot_ops%saw_q_s, self%boot_ops%saw_dq, &
-                  self%boot_ops%saw_ramp, self%boot_ops%saw_rule, qn, djr, rho_s, rho_m, n_dips, w)
-DO i = 1, n
-  dj(n + 1 - i) = djr(i)
+!---Nodes kept for the reset: the axis (if it is a node) and every node whose bin adds >= dAmin
+ALLOCATE(kk(n))
+dAmin = 0.25_r8*Ar(n)/REAL(n-1,r8)
+nk = 0
+alast = 0.0_r8
+IF(1.0_r8 - xn(n) < 1.0e-12_r8)THEN
+  nk = 1; kk(1) = 1
+END IF
+DO i = 2, n
+  IF(Ar(i) - alast >= dAmin .OR. (i == n .AND. nk < 2))THEN
+    nk = nk + 1; kk(nk) = i; alast = Ar(i)
+  ELSE IF(i == n)THEN
+    kk(nk) = n
+  END IF
 END DO
+!---q_base on the kept nodes; the axis takes the ratio of the first node off it
+DO i = 1, nk
+  r(i) = 1.0_r8
+  IF(ABS(Ib(kk(i))) > 0.0_r8 .AND. Ar(kk(i)) > 0.0_r8)r(i) = I_eq(n+1-kk(i))/Ib(kk(i))
+END DO
+IF(Ar(kk(1)) <= 0.0_r8 .AND. nk > 1)r(1) = r(2)
+DO i = 1, nk
+  qb(i) = q_eq(kk(i))*r(i)
+END DO
+CALL saw_reset_1d(nk, rho(kk(1:nk)), qb(1:nk), Ib(kk(1:nk)), Ar(kk(1:nk)), c1(kk(1:nk)), &
+                  self%boot_ops%saw_q_s, self%boot_ops%saw_dq, self%boot_ops%saw_ramp, &
+                  self%boot_ops%saw_rule, qn(1:nk), djr(1:nk), rho_s, rho_m, n_dips, w)
+DO i = 1, n
+  dj(n + 1 - i) = linterp(rho(kk(1:nk)), djr(1:nk), nk, rho(i), 1)
+END DO
+IF(.NOT.ALL(ABS(dj) < HUGE(1.0_r8)))THEN
+  CALL oft_warn('saw_redistribute: non-finite reset current, skipping the reset this update')
+  dj = 0.0_r8
+END IF
 self%boot_profs%saw_rho_m = rho_m
 self%boot_profs%saw_n_dips = n_dips
 IF(self%boot_ops%diagnose_bs)THEN
@@ -844,7 +872,7 @@ IF(self%boot_ops%diagnose_bs)THEN
     rho_s, rho_m, n_dips, w, qb(1), qn(1)
 END IF
 CALL spline_dealloc(q_spl)
-DEALLOCATE(q_eq, c1, rho, qb, Ib, Ar, qn, djr, r, phi)
+DEALLOCATE(q_eq, c1, rho, qb, Ib, Ar, qn, djr, r, phi, kk)
 END SUBROUTINE saw_redistribute
 !---------------------------------------------------------------------------------
 !> Monotone sawtooth q reset on a 1-D profile (axis first), after FUSE's saw_crash!.
