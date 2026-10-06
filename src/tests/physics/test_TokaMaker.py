@@ -2003,6 +2003,15 @@ def run_ITER_bootstrap_saw_internal(mesh_resolution, fe_order, mp_q):
             raise AssertionError("j_saw / jphi_fixed with jphi_saw_prof (saw off) wrong")
         if not (sum_ok(p_fix) and sum_ok(p_saw)):
             raise AssertionError("total_j_phi != j_ind + j_bs + jphi_fixed + j_saw")
+        # jphi_saw survives an equilibrium save/load: re-solving the reloaded state keeps j_saw
+        # (zeroed before the reload, since replace_eq loads into a copy of the live equilibrium)
+        mygs._tMaker_equil.save_TokaMaker('ITER_saw_roundtrip.h5')
+        mygs.set_kinetic_profiles(jphi_saw_prof={'x': np.array([0.0, 1.0]), 'y': np.zeros(2)})
+        mygs.replace_eq(source_file='ITER_saw_roundtrip.h5')
+        mygs.solve()
+        p_rel = mygs.get_boot_profs()
+        if not (close(p_rel['j_saw'], p_saw['j_saw'], 1e-6) and close(p_rel['total_j_phi'], p_saw['total_j_phi'], 1e-3)):
+            raise AssertionError("jphi_saw lost in the equilibrium save/load")
         # (c, d) q_s below min q: no reset, same result as saw off (alpha through the cumulative integral)
         p_low = mygs.solve_bootstrap(saw_q_s=0.5*np.min(q_base), **common)
         if np.any(p_low['j_saw'] != 0.0) or p_low['saw_n_dips'] != 0:
