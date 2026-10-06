@@ -356,8 +356,9 @@ end subroutine jphi_bs_delete
 !> Update F*F' profile from inductive Jphi coupled with bootstrap current.
 !>
 !> Each call (one NL iteration):
-!>   1. <R>, <1/R>, <1/R^2> on the LCFS and self%x nodes; pressure scale.
-!>   2. Evaluate fixed current jphi_fixed and bootstrap current j_BS on self%x (or reuse cache if frozen).
+!>   1. Pressure scale.
+!>   2. Evaluate fixed current jphi_fixed and bootstrap current j_BS on self%x (or reuse cache if frozen);
+!>      <R>, <1/R>, <1/R^2> on the nodes from its Sauter pass, else (and on the LCFS) from gs_ravgs.
 !>   3. Apply edge taper to j_BS, jphi_ind and jphi_fixed component-wise.
 !>   4. Solve analytically for alpha: the exact I_p (gs_flux_int of eval_jtor_imas, eq. A9c) is
 !>      affine in alpha, so two evaluations (alpha=0, alpha=1) give
@@ -387,6 +388,7 @@ REAL(r8), ALLOCATABLE :: jphi_fixed(:)  !< Fixed current from gseq%jphi_fixed (A
 REAL(r8) :: alpha, ip_target, ip_ind, ip_result_lo, ip_result_hi, dalpha
 ! Relative change in bootstrap current for freeze check
 REAL(r8) :: djBS
+LOGICAL :: bs_frozen !< j_BS reused from the last update (no Sauter pass)
 ! Diagnostic I_p comparison
 REAL(r8) :: itor_nl, itor_flint
 REAL(r8) :: wt(5) !< Wall times [s]: <R> averages, bootstrap, alpha solve, update total, start
@@ -420,12 +422,10 @@ IF(.NOT.ASSOCIATED(gseq%ni)) &
 IF(.NOT.ASSOCIATED(gseq%Zeff)) &
   CALL oft_abort("Jphi-BS profile requires Zeff profile", &
                  "jphi_bs_update",__FILE__)
-!--- 1. <R>, <1/R>, <1/R^2> (I_p measure, F*F' map); pressure scale.
+!--- 1. Pressure scale.
 ALLOCATE(jtor(0:self%npsi), psi_n(0:self%npsi), ravgs(0:self%npsi,3))
 psi_n = [0.0_r8, xpsi]
 wt=0.d0; wt(5)=omp_get_wtime()
-CALL gs_ravgs(gseq, self%npsi+1, psi_n, ravgs)
-wt(1)=omp_get_wtime()-wt(5)
 CALL gseq%P%update(gseq) ! Make sure pressure profile is up to date with EQ
 IF(ASSOCIATED(gseq%P_ani)) &
   CALL oft_abort('Jphi profiles do not support anisotropic pressure', &
@@ -442,7 +442,8 @@ IF(ASSOCIATED(gseq%jphi_fixed))THEN
   END DO
 END IF
 ALLOCATE(j_BS(0:self%npsi))
-IF(self%freeze_j_BS .AND. ASSOCIATED(self%j_BS_last)) THEN
+bs_frozen = self%freeze_j_BS .AND. ASSOCIATED(self%j_BS_last)
+IF(bs_frozen) THEN
   !--- Frozen: reuse cached j_BS.
   j_BS = self%j_BS_last
   djBS = 0.0_r8
@@ -455,7 +456,7 @@ ELSE
         isolate_edge_jBS=self%boot_ops%isolate_edge_jBS, &
         parameterize_jBS=self%boot_ops%parameterize_jBS, &
         scale_jBS=self%boot_ops%scale_jBS, &
-        j_spike=j_spike_tmp, j_spike_masked=j_spike_mask_tmp)
+        j_spike=j_spike_tmp, j_spike_masked=j_spike_mask_tmp, ravgs=ravgs(1:,:))
     IF (self%boot_ops%diagnose_bs) THEN
       IF (self%boot_ops%parameterize_jBS) THEN
         WRITE(*,'(A)') '  [diagnose_bs] i  psi_N         j_BS(bulk)[A/m2]  j_spike[A/m2]   j_spike_masked[A/m2]  jphi[A/m2]  jphi_fixed[A/m2]'
@@ -472,7 +473,7 @@ ELSE
     j_BS = j_spike_tmp
     DEALLOCATE(j_spike_tmp, j_spike_mask_tmp)
   ELSE
-    CALL calculate_bootstrap(self, gseq, self%npsi, xpsi, j_BS)
+    CALL calculate_bootstrap(self, gseq, self%npsi, xpsi, j_BS, ravgs=ravgs(1:,:))
     j_BS = j_BS * self%boot_ops%scale_jBS
     IF(self%boot_ops%diagnose_bs)THEN
       WRITE(*,'(A)') '  [diagnose_bs] i  psi_N         j_BS[A/m2]      jphi[A/m2]  jphi_fixed[A/m2]'
@@ -516,6 +517,14 @@ ELSE
   self%j_BS_last = j_BS
   wt(2)=omp_get_wtime()-wt(2)
 END IF
+!--- 2b. <R>, <1/R>, <1/R^2> (I_p measure, F*F' map) not set by the Sauter pass
+wt(1)=omp_get_wtime()
+IF(bs_frozen)THEN
+  CALL gs_ravgs(gseq, self%npsi+1, psi_n, ravgs)
+ELSE
+  CALL gs_ravgs(gseq, 1, psi_n(0:0), ravgs(0:0,:))
+END IF
+wt(1)=omp_get_wtime()-wt(1)
 !--- 3. Apply edge taper to j_BS, jphi_ind and jphi_fixed (jphi_fixed first converted to mu0*A/m²).
 !   self%j_BS_last caches the un-tapered j_BS so freeze comparisons track physics.
 !   taper_edge_psi0 is in standard convention (0=axis,1=LCFS);
@@ -614,9 +623,9 @@ gseq%p_scale=pscale
 wt(4)=omp_get_wtime()-wt(5)
 !--- 6. Diagnostics.
 IF(self%boot_ops%diagnose_bs)THEN
-  WRITE(*,'(A,L1,4(A,F9.4))') '  [bs_timing] bs_frozen=', wt(2)==0.d0, ' ravg=', wt(1), &
+  WRITE(*,'(A,L1,4(A,F9.4))') '  [bs_timing] bs_frozen=', bs_frozen, ' ravg=', wt(1), &
     ' bootstrap=', wt(2), ' alpha=', wt(3), ' update=', wt(4)
-  IF(wt(2)>0.d0)WRITE(*,'(A,F9.4)') '  [bs_timing] sauter_fc time=', sauter_wtime
+  IF(.NOT.bs_frozen)WRITE(*,'(A,F9.4)') '  [bs_timing] sauter_fc time=', sauter_wtime
   WRITE(*,'(A,ES12.4)') '  [jphi_bs_update] ip_target   = ', ip_target
   WRITE(*,'(A,ES12.4)') '  [jphi_bs_update] ip_result_lo= ', ip_result_lo
   WRITE(*,'(A,ES12.4)') '  [jphi_bs_update] ip_result_hi= ', ip_result_hi
@@ -698,7 +707,7 @@ end subroutine sauter_apply
 !! trapezoidal quadrature over the tracer steps. Surfaces are traced in parallel
 !! from start points found serially, so results do not depend on the thread count.
 !------------------------------------------------------------------------------
-subroutine sauter_fc(gseq,nr,psi_q,fc,r_avgs,modb_avgs,qprof,eps)
+subroutine sauter_fc(gseq,nr,psi_q,fc,r_avgs,modb_avgs,qprof,eps,invr2)
 class(gs_equil), intent(inout) :: gseq !< G-S object
 integer(4), intent(in) :: nr !< Number of flux sample points
 real(8), intent(in) :: psi_q(nr) !< Location of flux sample points in normalised psi
@@ -707,9 +716,10 @@ real(8), intent(out) :: r_avgs(nr,3) !< Flux surface averaged radial coords \f$<
 real(8), intent(out) :: modb_avgs(nr,2) !< Flux surface averaged field \f$<|B|>\f$, \f$<|B|^2>\f$
 real(8), optional, intent(out) :: qprof(nr) !< Safety factor q on each surface (avoids a separate gs_get_qprof call)
 real(8), optional, intent(out) :: eps(nr) !< Local inverse aspect ratio \f$ \varepsilon = (R_{\max}-R_{\min})/(2\langle R \rangle) \f$ on each surface
+real(8), optional, intent(out) :: invr2(nr) !< \f$<1/R^2>\f$ on each surface
 real(8) :: psi_surf,rmax,x1,x2,raxis,zaxis,h,h2,hf,ftu,ftl,t0
 real(8) :: pt(3),pt_last(3),f(3),psi_tmp(1),gop(3,3)
-real(8), allocatable :: pts(:,:),fpol(:),qtmp(:),epstmp(:)
+real(8), allocatable :: pts(:,:),fpol(:),qtmp(:),epstmp(:),i2tmp(:)
 real(8), pointer :: ptout(:,:),vout(:,:)
 real(8), allocatable :: acc(:,:),ext(:,:),bref(:)
 logical, allocatable :: done(:)
@@ -747,7 +757,7 @@ IF(oft_debug_print(1))THEN
   WRITE(*,'(2A,ES11.3)')oft_indent,'Rmax = ',rmax
   CALL oft_decrease_indent
 END IF
-ALLOCATE(pts(2,nr),fpol(nr),qtmp(nr),epstmp(nr),done(nr))
+ALLOCATE(pts(2,nr),fpol(nr),qtmp(nr),epstmp(nr),i2tmp(nr),done(nr))
 DO j=1,nr
   psi_surf=psi_q(j)*(x2-x1) + x1
   IF(gseq%mode==0)THEN
@@ -765,6 +775,7 @@ DO j=1,nr
   fc(j)          = 1.d0
   qtmp(j)        = 0.d0 ! Taken from the previous surface below
   epstmp(j)      = 0.d0
+  i2tmp(j)       = 1.d0/raxis**2
 END DO
 !---Cut-cell averages and extrema
 sauter_wtime=0.d0
@@ -790,6 +801,7 @@ IF(torflux_qgeom_backend/=1)THEN
     fc(j) = 1.d0 - (0.75d0 * ftu + 0.25d0 * ftl)
     qtmp(j) = fpol(j) * acc(7,j) / (2.d0*pi*ABS(x2-x1))
     epstmp(j) = (ext(2,j) + ext(3,j)) / (2.d0 * r_avgs(j,1))
+    i2tmp(j) = acc(7,j)/acc(1,j)
   END DO
   done=done.OR.(psi_q == 1.d0)
   DEALLOCATE(acc,ext,bref)
@@ -856,6 +868,7 @@ do j=1,nr
   fc(j) = 1.d0 - (0.75d0 * ftu + 0.25d0 * ftl)
   qtmp(j) = fpol(j) * active_tracer%v(8) / (2*pi)
   epstmp(j) = (field%rmax_surf - field%rmin_surf) / (2.d0 * r_avgs(j,1))
+  i2tmp(j) = active_tracer%v(8)/active_tracer%v(2)
 end do
 DEALLOCATE(ptout,vout)
 CALL active_tracer%delete
@@ -868,7 +881,8 @@ DO j=1,nr
 END DO
 IF(PRESENT(qprof))qprof=qtmp
 IF(PRESENT(eps))eps=epstmp
-DEALLOCATE(pts,fpol,qtmp,epstmp,done)
+IF(PRESENT(invr2))invr2=i2tmp
+DEALLOCATE(pts,fpol,qtmp,epstmp,i2tmp,done)
 end subroutine sauter_fc
 !------------------------------------------------------------------------------
 !> Trapped-particle integral \f$ \langle (1-\sqrt{1-b}(1+b/2))/b^2 \rangle \f$ by
@@ -1058,7 +1072,7 @@ END SUBROUTINE gradient_
 !------------------------------------------------------------------------------
 SUBROUTINE calculate_bootstrap(self, gseq, n_psi, psi_N, j_BS, &
                                isolate_edge_jBS, parameterize_jBS, scale_jBS, &
-                               j_spike, j_spike_masked)
+                               j_spike, j_spike_masked, ravgs)
 CLASS(jphi_bs_flux_func), INTENT(inout) :: self
 CLASS(gs_equil), INTENT(inout) :: gseq
 INTEGER(i4), INTENT(in) :: n_psi
@@ -1069,6 +1083,7 @@ LOGICAL,  OPTIONAL, INTENT(in)  :: parameterize_jBS  !< If .TRUE., use parametri
 REAL(r8), OPTIONAL, INTENT(in)  :: scale_jBS         !< Scaling factor applied to spike profile (default 1)
 REAL(r8), OPTIONAL, INTENT(out) :: j_spike(0:n_psi)        !< Processed spike profile [A/m^2]
 REAL(r8), OPTIONAL, INTENT(out) :: j_spike_masked(0:n_psi) !< Raw masked (pre-fit) spike profile [A/m^2]
+REAL(r8), OPTIONAL, INTENT(out) :: ravgs(n_psi,3) !< <R>, <1/R>, <1/R^2> on psi_N from the Sauter pass
 !---
 INTEGER(i4) :: i
 REAL(r8) :: psi_abs(n_psi)
@@ -1082,6 +1097,7 @@ REAL(r8) :: qvals(n_psi)    !< Safety factor
 REAL(r8) :: R_avg(n_psi)    !< <R> [m] per flux surface
 REAL(r8) :: B_avg(n_psi)    !< <B> [T] per flux surface
 REAL(r8) :: r_avgs_saut(n_psi,3)    !< Sauter FSA: <R>, <1/R>, <a>
+REAL(r8) :: invr2(n_psi)            !< Sauter FSA: <1/R^2>
 REAL(r8) :: modb_avgs_saut(n_psi,2) !< Sauter FSA: <|B|>, <|B|^2>
 REAL(r8) :: dn_e_dpsi(n_psi), dT_e_dpsi(n_psi)
 REAL(r8) :: dn_i_dpsi(n_psi), dT_i_dpsi(n_psi)
@@ -1119,7 +1135,8 @@ DO i = 1, n_psi
   END IF
 END DO
 ! Get flux-surface geometry: fc, eps, q, and <R> in one tracing pass
-CALL sauter_fc(gseq, n_psi, psi_N, fc, r_avgs_saut, modb_avgs_saut, qprof=qvals, eps=eps)
+CALL sauter_fc(gseq, n_psi, psi_N, fc, r_avgs_saut, modb_avgs_saut, qprof=qvals, eps=eps, invr2=invr2)
+IF(PRESENT(ravgs))ravgs = RESHAPE([r_avgs_saut(:,1:2), invr2], [n_psi,3])
 R_avg = r_avgs_saut(:,1)
 B_avg = modb_avgs_saut(:,1)
 ! ===================================================================
