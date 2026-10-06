@@ -1996,7 +1996,9 @@ def run_ITER_bootstrap_saw_internal(mesh_resolution, fe_order, mp_q):
         if not (sum_ok(p_fix) and sum_ok(p_saw)):
             raise AssertionError("total_j_phi != j_ind + j_bs + jphi_fixed + j_saw")
         # jphi_saw survives an equilibrium save/load: re-solving the reloaded state keeps j_saw
+        # (zeroed before the reload, since replace_eq loads into a copy of the live equilibrium)
         mygs._tMaker_equil.save_TokaMaker('ITER_saw_roundtrip.h5')
+        mygs.set_kinetic_profiles(jphi_saw_prof={'x': np.array([0.0, 1.0]), 'y': np.zeros(2)})
         mygs.replace_eq(source_file='ITER_saw_roundtrip.h5')
         mygs.solve()
         p_rel = mygs.get_boot_profs()
