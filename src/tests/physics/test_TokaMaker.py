@@ -756,7 +756,8 @@ def run_ITER_case(mesh_resolution,fe_orders,test_type,helicity,mp_q):
     # Save equilibrium to gEQDSK and i-file format
     mygs.save_eqdsk('tokamaker.eqdsk',nr=64,nz=64,lcfs_pad=0.001)
     mygs.save_ifile('tokamaker.ifile',npsi=64,ntheta=64,lcfs_pad=0.001)
-    eq_info.update(ifile_errors(mygs,'tokamaker.ifile'))
+    mygs.save_ifile('tokamaker_derivs.ifile',npsi=64,ntheta=64,lcfs_pad=0.001,profile_derivs=True)
+    eq_info.update(ifile_errors(mygs,'tokamaker_derivs.ifile'))
     # Save final one
     mp_q.put([eq_info])
     oftpy_dump_cov()
@@ -847,6 +848,9 @@ def test_ITER_eq(order,helicity):
     assert validate_dict(results,eq_dict)
     assert validate_eqdsk('tokamaker.eqdsk','ITER_test.eqdsk',helicity)
     assert validate_ifile('tokamaker.ifile','ITER_test.ifile',helicity)
+    # FF' and P' records are written only on request
+    from OpenFUSIONToolkit.TokaMaker.util import read_ifile
+    assert 'ffp' not in read_ifile('tokamaker.ifile')
     # i-file points lie on their flux surfaces; FF' and P' records match the profiles
     assert results[0]['ifile_psi_err'] < 1.E-10
     assert results[0]['ifile_ffp_err'] < 1.E-10

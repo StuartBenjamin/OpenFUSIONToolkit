@@ -735,7 +735,7 @@ end subroutine gs_load_tokamaker
 !---------------------------------------------------------------------------
 !> Needs docs
 !---------------------------------------------------------------------------
-subroutine gs_save_ifile(gseq,filename,npsi,ntheta,psi_pad,lcfs_press,pack_lcfs,single_prec,error_str)
+subroutine gs_save_ifile(gseq,filename,npsi,ntheta,psi_pad,lcfs_press,pack_lcfs,single_prec,profile_derivs,error_str)
 class(gs_equil), intent(inout) :: gseq !< G-S object
 CHARACTER(LEN=OFT_PATH_SLEN), intent(in) :: filename !< Outpute filename
 integer(4), intent(in) :: npsi !< Number of points in flux coordinate
@@ -744,6 +744,7 @@ REAL(8), intent(in) :: psi_pad !< Padding at LCFS in normalized units
 REAL(8), optional, intent(in) :: lcfs_press !< LCFS pressure
 LOGICAL, OPTIONAL, INTENT(in) :: pack_lcfs !< Use quadratic packing toward LCFS?
 LOGICAL, OPTIONAL, INTENT(in) :: single_prec !< Save file with single precision fields?
+LOGICAL, OPTIONAL, INTENT(in) :: profile_derivs !< Append F*dF/dpsi and dp/dpsi records? (extends the format)
 CHARACTER(LEN=OFT_ERROR_SLEN), OPTIONAL, INTENT(out) :: error_str
 type(gsinv_interp), pointer :: field
 type(oft_lag_brinterp) :: psi_int
@@ -755,7 +756,7 @@ real(8), allocatable :: ptout(:,:)
 real(8), allocatable :: rout(:,:),zout(:,:),cout(:,:)
 real(8), parameter :: tol=1.d-10
 integer(4) :: j,k,cell,io_unit,cell_snap
-LOGICAL :: do_pack,save_single
+LOGICAL :: do_pack,save_single,save_derivs
 TYPE(spline_type) :: rz
 type(gs_factory), pointer :: device
 device=>gseq%device
@@ -765,8 +766,10 @@ WRITE(*,'(3A)')oft_indent,'Saving iFile: ',TRIM(filename)
 CALL oft_increase_indent
 do_pack=.FALSE.
 save_single=.FALSE.
+save_derivs=.FALSE.
 IF(PRESENT(pack_lcfs))do_pack=pack_lcfs
 IF(PRESENT(single_prec))save_single=single_prec
+IF(PRESENT(profile_derivs))save_derivs=profile_derivs
 !---
 raxis=gseq%o_point(1)
 zaxis=gseq%o_point(2)
@@ -965,18 +968,20 @@ ELSE
   WRITE(io_unit)zout
 END IF
 !---------------------------------------------------------------------------
-! Write out profile derivatives (after the original records)
+! Optionally write out profile derivatives (after the original records)
 !
 ! cout(:,5) -> F*dF/dpsi(0:npsi)
 ! cout(:,6) -> dp/dpsi(0:npsi)
 !---------------------------------------------------------------------------
-DO j=5,6
-  IF(save_single)THEN
-    WRITE(io_unit)REAL(cout(:,j),4)
-  ELSE
-    WRITE(io_unit)cout(:,j)
-  END IF
-END DO
+IF(save_derivs)THEN
+  DO j=5,6
+    IF(save_single)THEN
+      WRITE(io_unit)REAL(cout(:,j),4)
+    ELSE
+      WRITE(io_unit)cout(:,j)
+    END IF
+  END DO
+END IF
 !---------------------------------------------------------------------------
 ! Close output file
 !---------------------------------------------------------------------------
