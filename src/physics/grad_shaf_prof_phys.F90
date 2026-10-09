@@ -21,11 +21,11 @@ use oft_lag_basis, only: oft_blag_d2eval, oft_blag_geval
 USE oft_blag_operators, only: oft_lag_brinterp, oft_lag_bginterp
 use oft_gs, only: gs_equil, flux_func, gs_psi2r, gs_itor_nl, oft_indent, &
   oft_increase_indent, oft_decrease_indent, gsinv_interp, gs_prof_interp, &
-  gs_get_qprof, gs_ani_press, gs_epsilon, flux_coord_name, torflux_qgeom_backend
-use oft_gs_cutcell, only: gs_ravg_cutcell
+  gs_get_qprof, gs_ani_press, gs_epsilon
+use oft_gs_cutcell, only: gs_fsa_cutcell
 use tracing_2d, only: set_tracer, active_tracer, tracinginv_fs
 use oft_gs_profiles, only: spline_flux_func, linterp_flux_func, linterp_copy, &
-  spline_func_copy, spline_func_delete
+  spline_func_copy, spline_func_delete, phi_flux_wrapper, torflux_qgeom_backend
 use spline_mod
 USE mhd_utils, ONLY: mu0
 implicit none
@@ -197,7 +197,6 @@ SELECT TYPE(new)
   CLASS IS(mercier_flux_func)
     new%plasma_bounds=self%plasma_bounds
     new%f_offset=self%f_offset
-    new%coord=self%coord
     new%rs = self%rs
     new%ntheta = self%ntheta
     CALL spline_alloc(new%funcp,new%npsi,1)
@@ -225,7 +224,6 @@ real(8) :: raxis,zaxis,f(3),pt(3),x1,x2
 real(8), pointer, dimension(:) :: v
 real(8), parameter :: tol=1.d-10
 integer(4) :: j,k,cell
-IF(self%coord/=0)CALL oft_abort('Toroidal flux coordinate not supported for this profile','mercier_update',__FILE__)
 !
 IF(oft_debug_print(2))THEN
   WRITE(*,'(2A)')oft_indent,'Updating Mercier Pressure:'
@@ -411,7 +409,7 @@ end subroutine jphi_save_hdf5
 subroutine jphi_save_txt(self,io_unit)
 class(jphi_flux_func), intent(inout) :: self
 integer, intent(in) :: io_unit
-WRITE(io_unit,*)'jphi-linterp '//TRIM(flux_coord_name(self%coord))
+WRITE(io_unit,*)'jphi-linterp'
 WRITE(io_unit,*)self%npsi,self%j0
 WRITE(io_unit,*)self%x
 WRITE(io_unit,*)self%jphi
@@ -503,7 +501,6 @@ SELECT TYPE(new)
   CLASS IS(jphi_flux_func)
     new%plasma_bounds=self%plasma_bounds
     new%f_offset=self%f_offset
-    new%coord=self%coord
     new%j0 = self%j0
     new%norm_last = self%norm_last
     ALLOCATE(new%jphi, SOURCE=self%jphi)
@@ -576,21 +573,24 @@ DEALLOCATE(ravgs)
 i=self%set_cofs(self%yp)
 end subroutine jphi_update
 !------------------------------------------------------------------------------
-!> Node locations in normalized poloidal flux (maps `x` from toroidal flux if `coord=2`)
+!> Node locations in normalized poloidal flux (`x` mapped from toroidal flux if wrapped)
 !------------------------------------------------------------------------------
 subroutine jphi_psi_nodes(self,xpsi)
 class(jphi_flux_func), intent(inout) :: self
 REAL(r8), ALLOCATABLE, INTENT(out) :: xpsi(:) !< Node locations in \f$ 1-\hat{\psi} \f$
 INTEGER(i4) :: i
-IF(self%coord==1)CALL oft_abort('Jphi profiles on toroidal flux must use "phi_n_relabel"', &
-  'jphi_psi_nodes',__FILE__)
 ALLOCATE(xpsi(self%npsi))
 xpsi=self%x
-IF(self%coord==2.AND.ASSOCIATED(self%tmap))THEN
-  DO i=1,self%npsi
-    xpsi(i)=self%tmap%inv(self%x(i))
-  END DO
-END IF
+IF(.NOT.ASSOCIATED(self%phi_wrapper))RETURN
+SELECT TYPE(wrap=>self%phi_wrapper)
+  TYPE IS(phi_flux_wrapper)
+    IF(.NOT.wrap%relabel)CALL oft_abort('Jphi profiles on toroidal flux must use "phi_n_relabel"', &
+      'jphi_psi_nodes',__FILE__)
+    IF(.NOT.ASSOCIATED(wrap%map))RETURN
+    DO i=1,self%npsi
+      xpsi(i)=wrap%map%inv(self%x(i))
+    END DO
+END SELECT
 end subroutine jphi_psi_nodes
 !---------------------------------------------------------------------------------
 !> Area integral over the plasma (inside the LCFS) of a flux function given on
@@ -638,28 +638,37 @@ INTEGER(i4), INTENT(in) :: nf !< Number of fields
 REAL(r8), INTENT(in) :: psi_tmp(nvals) !< Nodes in normalized psi (0 at LCFS, 1 at axis), ascending
 REAL(r8), INTENT(in) :: fields(nvals,nf) !< Fields on the nodes
 REAL(r8), INTENT(out) :: cum(nvals,nf) !< Integral over psi >= psi_tmp(k) of each field
-INTEGER(i4) :: i,m,k,inds(2)
+INTEGER(i4), PARAMETER :: nblk_cells=64 !< Cells per block (fixed-order sums, independent of the thread count)
+INTEGER(i4) :: i,m,k,ib,nblk,inds(2)
 REAL(r8) :: area,psitmp(1),sgop(3,3),facs(2)
-REAL(r8), ALLOCATABLE :: bins(:,:)
+REAL(r8), ALLOCATABLE :: bins(:,:),bblk(:,:,:)
 TYPE(gs_prof_interp) :: prof_interp_obj
-ALLOCATE(bins(nvals,nf))
-bins=0.d0
+nblk=(self%device%mesh%nc+nblk_cells-1)/nblk_cells
+ALLOCATE(bins(nvals,nf),bblk(nvals,nf,nblk))
+bblk=0.d0
 prof_interp_obj%mode=4
 CALL prof_interp_obj%setup(self)
-!$omp parallel do private(m,psitmp,sgop,area,inds,facs) reduction(+:bins)
-do i=1,self%device%mesh%nc
-  IF(self%device%mesh%reg(i)/=1)CYCLE
-  do m=1,self%device%fe_rep%quad%np
-    call self%device%mesh%jacobian(i,self%device%fe_rep%quad%pts(:,m),sgop,area)
-    call prof_interp_obj%interp(i,self%device%fe_rep%quad%pts(:,m),sgop,psitmp)
-    IF(psitmp(1)<=0.d0)CYCLE ! outside the plasma
-    CALL linterp_facs(psi_tmp,nvals,psitmp(1),inds,facs,0)
-    IF(inds(1)<=0)CYCLE
-    area=area*self%device%fe_rep%quad%wts(m)
-    ! Lower node inds(2) is the innermost surface enclosing this point
-    bins(inds(2),:)=bins(inds(2),:)+(fields(inds(1),:)*facs(1)+fields(inds(2),:)*facs(2))*area
+!$omp parallel do private(i,m,psitmp,sgop,area,inds,facs) schedule(dynamic,1)
+do ib=1,nblk
+  do i=(ib-1)*nblk_cells+1,MIN(ib*nblk_cells,self%device%mesh%nc)
+    IF(self%device%mesh%reg(i)/=1)CYCLE
+    do m=1,self%device%fe_rep%quad%np
+      call self%device%mesh%jacobian(i,self%device%fe_rep%quad%pts(:,m),sgop,area)
+      call prof_interp_obj%interp(i,self%device%fe_rep%quad%pts(:,m),sgop,psitmp)
+      IF(psitmp(1)<=0.d0)CYCLE ! outside the plasma
+      CALL linterp_facs(psi_tmp,nvals,psitmp(1),inds,facs,0)
+      IF(inds(1)<=0)CYCLE
+      area=area*self%device%fe_rep%quad%wts(m)
+      ! Lower node inds(2) is the innermost surface enclosing this point
+      bblk(inds(2),:,ib)=bblk(inds(2),:,ib)+(fields(inds(1),:)*facs(1)+fields(inds(2),:)*facs(2))*area
+    end do
   end do
 end do
+bins=0.d0
+DO ib=1,nblk
+  bins=bins+bblk(:,:,ib)
+END DO
+DEALLOCATE(bblk)
 DO k=1,nf
   bins(:,k)=oft_mpi_sum(bins(:,k),nvals)
 END DO
@@ -673,9 +682,10 @@ END SUBROUTINE gs_flux_cumint
 !------------------------------------------------------------------------------
 !> Flux surface averages <R>, <1/R>, <1/R^2> on normalized psi nodes (0 at the LCFS, 1 at the axis)
 !!
-!! Cut-cell quadrature (@ref oft_gs_cutcell::gs_ravg_cutcell), tracing only surfaces it cannot
+!! Cut-cell quadrature (@ref oft_gs_cutcell::gs_fsa_cutcell), tracing only surfaces it cannot
 !! close, or all when `torflux_qgeom_backend=1` (testing). The axis takes its exact limit; nodes
-!! at or outside the LCFS are traced on it if limited, or `psi_pad` inside it if diverted.
+!! at or outside the LCFS are traced on it if limited, or `psi_pad` inside it if diverted. Nodes
+!! that fail both methods take the averages of the nearest node that did not.
 !------------------------------------------------------------------------------
 SUBROUTINE gs_ravgs(gseq, n, psi_vals, ravgs)
 CLASS(gs_equil), INTENT(inout) :: gseq !< G-S object
@@ -683,14 +693,17 @@ INTEGER(i4), INTENT(in) :: n !< Number of nodes
 REAL(r8), INTENT(in) :: psi_vals(n) !< Node locations
 REAL(r8), INTENT(out) :: ravgs(n,3) !< <R>, <1/R>, <1/R^2> at each node
 REAL(r8), PARAMETER :: psi_pad = 1.d-3
-REAL(r8) :: psi_q(n)
+REAL(r8) :: psi_q(n), qf(n), avgs(n,4)
 REAL(r8), ALLOCATABLE :: rtr(:,:), qtr(:)
 LOGICAL :: ok(n)
 INTEGER(i4) :: k, m
 psi_q = MERGE(psi_vals, MERGE(psi_pad, 0.d0, gseq%diverted), psi_vals>0.d0)
 ravgs = 0.d0
 ok = .FALSE.
-IF(torflux_qgeom_backend/=1)CALL gs_ravg_cutcell(gseq, n, psi_q, ravgs, ok)
+IF(torflux_qgeom_backend/=1)THEN
+  CALL gs_fsa_cutcell(gseq, n, psi_q, qf, avgs, ok)
+  ravgs = avgs(:,1:3)
+END IF
 WHERE(psi_q>=1.d0)
   ravgs(:,1) = gseq%o_point(1)
   ravgs(:,2) = 1.d0/gseq%o_point(1)
@@ -706,6 +719,24 @@ DO k=1,3
   ravgs(:,k) = UNPACK(rtr(:,k), .NOT.ok, ravgs(:,k))
 END DO
 DEALLOCATE(rtr, qtr)
+!---Nodes that failed both methods (zero averages) take the averages of the nearest node that did not
+ok = (ravgs(:,2) > 0.d0)
+IF(ALL(ok).OR.(.NOT.ANY(ok)))RETURN ! None: no equilibrium yet, the caller sees zeros
+DO k=1,n
+  IF(ok(k))CYCLE
+  DO m=1,n
+    IF(k-m>=1)THEN
+      IF(ok(k-m))THEN
+        ravgs(k,:)=ravgs(k-m,:); EXIT
+      END IF
+    END IF
+    IF(k+m<=n)THEN
+      IF(ok(k+m))THEN
+        ravgs(k,:)=ravgs(k+m,:); EXIT
+      END IF
+    END IF
+  END DO
+END DO
 END SUBROUTINE gs_ravgs
 !------------------------------------------------------------------------------
 !> IMAS-convention <j_phi/R>/<1/R> from TokaMaker jphi = <j_phi> on the psi_N grid psi_vals
@@ -764,7 +795,7 @@ end subroutine dipole_b0_save_hdf5
 subroutine dipole_b0_save_txt(self,io_unit)
 class(dipole_b0_flux_func), intent(inout) :: self
 integer, intent(in) :: io_unit
-WRITE(io_unit,*)'dipole_b0 '//TRIM(flux_coord_name(self%coord))
+WRITE(io_unit,*)'dipole_b0'
 WRITE(io_unit,*)self%npsi,self%psi_pad
 end subroutine dipole_b0_save_txt
 !------------------------------------------------------------------------------
@@ -804,7 +835,6 @@ SELECT TYPE(new)
   TYPE IS(dipole_b0_flux_func)
     new%plasma_bounds=self%plasma_bounds
     new%f_offset=self%f_offset
-    new%coord=self%coord
     new%psi_pad=self%psi_pad
 END SELECT
 end subroutine dipole_b0_copy
@@ -829,7 +859,6 @@ real(8) :: raxis,zaxis,f(3),pt(3),x1,x2,xr
 real(8), pointer, dimension(:) :: v
 real(8), parameter :: tol=1.d-10
 integer(4) :: j,k,cell
-IF(self%coord/=0)CALL oft_abort('Toroidal flux coordinate not supported for this profile','dipole_b0_update',__FILE__)
 !
 IF(oft_debug_print(2))THEN
   WRITE(*,'(2A)')oft_indent,'Updating Dipole B0 profile:'
@@ -1068,7 +1097,7 @@ end subroutine mirror_b0_save_hdf5
 subroutine mirror_b0_save_txt(self,io_unit)
 class(mirror_b0_flux_func), intent(inout) :: self
 integer, intent(in) :: io_unit
-WRITE(io_unit,*)'mirror_b0 '//TRIM(flux_coord_name(self%coord))
+WRITE(io_unit,*)'mirror_b0'
 WRITE(io_unit,*)self%npsi
 WRITE(io_unit,*)self%z_midplane
 end subroutine mirror_b0_save_txt
@@ -1110,7 +1139,6 @@ SELECT TYPE(new)
   TYPE IS(mirror_b0_flux_func)
     new%plasma_bounds=self%plasma_bounds
     new%f_offset=self%f_offset
-    new%coord=self%coord
     new%z_midplane = self%z_midplane
 END SELECT
 end subroutine mirror_b0_copy
@@ -1136,7 +1164,6 @@ real(8) :: raxis,zaxis,f(3),pt(3),x1,x2,xr
 real(8), pointer, dimension(:) :: v
 real(8), parameter :: tol=1.d-10
 integer(4) :: j,k,cell
-IF(self%coord/=0)CALL oft_abort('Toroidal flux coordinate not supported for this profile','mirror_b0_update',__FILE__)
 !
 IF(oft_debug_print(2))THEN
   WRITE(*,'(2A)')oft_indent,'Updating Mirror B0 profile:'

@@ -27,7 +27,8 @@ USE oft_blag_operators, ONLY: oft_blag_project, oft_lag_brinterp, oft_lag_bginte
 USE tracing_2d, ONLY: active_tracer, tracinginv_fs, set_tracer
 USE mhd_utils, ONLY: mu0
 USE oft_gs, ONLY: gs_factory, flux_func, gs_dflux, gs_itor_nl, gs_test_bounds, gs_b_interp, &
-  gsinv_interp, gs_psi2r, gs_psi2pt, gs_epsilon, gs_update_bounds, gs_bcrosskappa, gs_update_flux_funcs
+  gsinv_interp, gs_psi2r, gs_psi2pt, gs_epsilon, gs_update_bounds, gs_bcrosskappa, qprof_backend
+USE oft_gs_cutcell, ONLY: gs_rays_cutcell
 USE oft_gs_profiles
 USE grad_shaf_prof_phys, ONLY: jphi_flux_func
 USE grad_shaf_bootstrap, ONLY: jphi_bs_flux_func
@@ -67,23 +68,16 @@ SELECT CASE(TRIM(profType))
 END SELECT
 END SUBROUTINE gs_profile_alloc
 !---------------------------------------------------------------------------------
-!> Save flux function storage coordinate to HDF5 (only if non-default)
-!---------------------------------------------------------------------------------
-SUBROUTINE gs_profile_save_coord(F,filename,path)
-CLASS(flux_func), INTENT(in) :: F !< Flux function object
-CHARACTER(LEN=*), INTENT(in) :: filename !< HDF5 file
-CHARACTER(LEN=*), INTENT(in) :: path !< Profile group path
-IF(F%coord/=0)CALL hdf5_write(F%coord,filename,path//'/COORD')
-END SUBROUTINE gs_profile_save_coord
-!---------------------------------------------------------------------------------
-!> Load flux function storage coordinate from HDF5 (default: psi_n)
+!> Wrap a loaded flux function if it was saved on toroidal flux (HDF5 `COORD`, default psi_n)
 !---------------------------------------------------------------------------------
 SUBROUTINE gs_profile_load_coord(F,filename,path)
-CLASS(flux_func), INTENT(inout) :: F !< Flux function object
+CLASS(flux_func), POINTER, INTENT(inout) :: F !< Flux function object
 CHARACTER(LEN=*), INTENT(in) :: filename !< HDF5 file
 CHARACTER(LEN=*), INTENT(in) :: path !< Profile group path
-F%coord=0
-IF(hdf5_field_exist(filename,path//'/COORD'))CALL hdf5_read(F%coord,filename,path//'/COORD')
+INTEGER(4) :: coord
+coord=0
+IF(hdf5_field_exist(filename,path//'/COORD'))CALL hdf5_read(coord,filename,path//'/COORD')
+CALL torflux_wrap(F,coord)
 END SUBROUTINE gs_profile_load_coord
 !---------------------------------------------------------------------------------
 !> Create flux function object from definition file
@@ -105,17 +99,19 @@ OPEN(NEWUNIT=io_unit,FILE=TRIM(filename))
 READ(io_unit,'(A)')line
 coordType='psi_n'
 READ(line,*,IOSTAT=ios)profType,coordType
-IF(ios/=0)READ(line,*)profType
+IF(ios/=0)THEN
+  READ(line,*)profType
+  coordType='psi_n'
+END IF
 CALL gs_profile_alloc(profType,F)
 CALL F%load(io_unit)
 CLOSE(io_unit)
 SELECT CASE(TRIM(coordType))
   CASE("psi_n")
-    F%coord=0
   CASE("phi_n")
-    F%coord=1
+    CALL torflux_wrap(F,1)
   CASE("phi_n_relabel")
-    F%coord=2
+    CALL torflux_wrap(F,2)
   CASE DEFAULT
     CALL oft_abort('Invalid profile coordinate "'//TRIM(coordType)//'"','gs_profile_load',__FILE__)
 END SELECT
@@ -414,56 +410,45 @@ CALL hdf5_write(self%ffp_scale,filename,'tokamaker/FFP_SCALE')
 CALL hdf5_write(self%I%f_offset,filename,'tokamaker/F0')
 CALL hdf5_create_group(filename,'tokamaker/FFP_PROFILE')
 CALL self%I%save(filename,'tokamaker/FFP_PROFILE')
-CALL gs_profile_save_coord(self%I,filename,'tokamaker/FFP_PROFILE')
 CALL hdf5_write(self%p_scale,filename,'tokamaker/P_SCALE')
 CALL hdf5_create_group(filename,'tokamaker/PP_PROFILE')
 CALL self%P%save(filename,'tokamaker/PP_PROFILE')
-CALL gs_profile_save_coord(self%P,filename,'tokamaker/PP_PROFILE')
 IF(ASSOCIATED(self%I_NI))THEN
   CALL hdf5_create_group(filename,'tokamaker/NI_PROFILE')
   CALL self%I_NI%save(filename,'tokamaker/NI_PROFILE')
-  CALL gs_profile_save_coord(self%I_NI,filename,'tokamaker/NI_PROFILE')
 END IF
 IF(ASSOCIATED(self%eta))THEN
   CALL hdf5_create_group(filename,'tokamaker/ETA_PROFILE')
   CALL self%eta%save(filename,'tokamaker/ETA_PROFILE')
-  CALL gs_profile_save_coord(self%eta,filename,'tokamaker/ETA_PROFILE')
 END IF
 !---Save kinetic profiles (Te, Ti, ne, ni, Zeff, jphi_fixed, jphi_saw) if set
 IF(ASSOCIATED(self%Te))THEN
   CALL hdf5_create_group(filename,'tokamaker/TE_PROFILE')
   CALL self%Te%save(filename,'tokamaker/TE_PROFILE')
-  CALL gs_profile_save_coord(self%Te,filename,'tokamaker/TE_PROFILE')
 END IF
 IF(ASSOCIATED(self%Ti))THEN
   CALL hdf5_create_group(filename,'tokamaker/TI_PROFILE')
   CALL self%Ti%save(filename,'tokamaker/TI_PROFILE')
-  CALL gs_profile_save_coord(self%Ti,filename,'tokamaker/TI_PROFILE')
 END IF
 IF(ASSOCIATED(self%ne))THEN
   CALL hdf5_create_group(filename,'tokamaker/NE_PROFILE')
   CALL self%ne%save(filename,'tokamaker/NE_PROFILE')
-  CALL gs_profile_save_coord(self%ne,filename,'tokamaker/NE_PROFILE')
 END IF
 IF(ASSOCIATED(self%ni))THEN
   CALL hdf5_create_group(filename,'tokamaker/NI_DENS_PROFILE')
   CALL self%ni%save(filename,'tokamaker/NI_DENS_PROFILE')
-  CALL gs_profile_save_coord(self%ni,filename,'tokamaker/NI_DENS_PROFILE')
 END IF
 IF(ASSOCIATED(self%Zeff))THEN
   CALL hdf5_create_group(filename,'tokamaker/ZEFF_PROFILE')
   CALL self%Zeff%save(filename,'tokamaker/ZEFF_PROFILE')
-  CALL gs_profile_save_coord(self%Zeff,filename,'tokamaker/ZEFF_PROFILE')
 END IF
 IF(ASSOCIATED(self%jphi_fixed))THEN
   CALL hdf5_create_group(filename,'tokamaker/JPHI_FIXED_PROFILE')
   CALL self%jphi_fixed%save(filename,'tokamaker/JPHI_FIXED_PROFILE')
-  CALL gs_profile_save_coord(self%jphi_fixed,filename,'tokamaker/JPHI_FIXED_PROFILE')
 END IF
 IF(ASSOCIATED(self%jphi_saw))THEN
   CALL hdf5_create_group(filename,'tokamaker/JPHI_SAW_PROFILE')
   CALL self%jphi_saw%save(filename,'tokamaker/JPHI_SAW_PROFILE')
-  CALL gs_profile_save_coord(self%jphi_saw,filename,'tokamaker/JPHI_SAW_PROFILE')
 END IF
 ! IF(ASSOCIATED(self%P_ani))THEN
 !   CALL hdf5_create_group(filename,'tokamaker/P_ANI')
@@ -498,7 +483,7 @@ integer(4) :: hash_tmp,hash_in,io_unit,int_tmp,ndims
 integer(i4), allocatable :: dim_sizes(:)
 REAL(r8) :: pt_tmp(2),scale_tmp,diff_val
 real(r8), pointer :: vals_tmp(:)
-logical :: success,pm_save,logical_tmp
+logical :: success,pm_save,logical_tmp,restored
 CHARACTER(LEN=:), ALLOCATABLE :: profType
 error_string=''
 ! CALL hdf5_write(self%device%fe_rep%mesh%r,filename,'mesh/R')
@@ -837,7 +822,6 @@ IF(hdf5_field_exist(filename,'tokamaker/IP_TARGET'))THEN
     error_string='Failed to read Ip target.'
     RETURN
   END IF
-  self%Ip_target=self%Ip_target
 END IF
 IF(hdf5_field_exist(filename,'tokamaker/IP_RATIO_TARGET'))THEN
   CALL hdf5_read(self%Ip_ratio_target,filename,'tokamaker/IP_RATIO_TARGET',success=success)
@@ -933,8 +917,21 @@ IF(hdf5_field_exist(filename,'tokamaker/MIRNOV_TARGETS'))THEN
     RETURN
   END IF
 END IF
-!---Update all flux functions now that all fields (F0, targets, kinetics) are loaded
-CALL gs_update_flux_funcs(self)
+!---Update all flux functions now that all fields (F0, targets, kinetics) are loaded; a bootstrap
+!   F*F' restored from the file is kept as saved (an update would recompute it)
+CALL torflux_setup(self,resettle=.TRUE.)
+IF(ASSOCIATED(self%torflux))CALL self%torflux%update(self)
+restored=.FALSE.
+SELECT TYPE(I=>self%I)
+  TYPE IS(jphi_bs_flux_func)
+    restored=I%ffp_restored
+END SELECT
+IF(restored)THEN
+  self%I%plasma_bounds=self%plasma_bounds
+ELSE
+  CALL self%I%update(self)
+END IF
+CALL self%P%update(self)
 IF(ASSOCIATED(self%I_NI))CALL self%I_NI%update(self)
 IF(ASSOCIATED(self%eta))CALL self%eta%update(self)
 end subroutine gs_load_tokamaker
@@ -953,15 +950,14 @@ LOGICAL, OPTIONAL, INTENT(in) :: single_prec !< Save file with single precision 
 CHARACTER(LEN=OFT_ERROR_SLEN), OPTIONAL, INTENT(out) :: error_str
 type(gsinv_interp), pointer :: field
 type(oft_lag_brinterp) :: psi_int
-type(oft_lag_brinterp), pointer :: psi_loc
-type(oft_lag_bginterp), pointer :: psi_gloc
-real(8) :: gop(3,3),psi_surf(1),pt_last(3),pt_rz(2)
+real(8) :: gop(3,3),psi_surf(1),pt_last(3)
 real(8) :: raxis,zaxis,f(3),pt(3),rmax,x1,x2,xr
 real(8), allocatable :: ptout(:,:)
-real(8), allocatable :: rout(:,:),zout(:,:),cout(:,:)
+real(8), allocatable :: rout(:,:),zout(:,:),cout(:,:),psi_q(:),rzc(:,:,:),qf(:)
 real(8), parameter :: tol=1.d-10
-integer(4) :: j,k,cell,io_unit,cell_snap
-LOGICAL :: do_pack,save_single
+integer(4) :: j,k,cell,io_unit
+LOGICAL :: do_pack,save_single,cc_done
+LOGICAL, allocatable :: ok(:)
 TYPE(spline_type) :: rz
 type(gs_factory), pointer :: device
 device=>gseq%device
@@ -1016,16 +1012,45 @@ IF(oft_debug_print(1))THEN
   WRITE(*,'(2A,ES11.3)')oft_indent,'Rmax = ',rmax
   CALL oft_decrease_indent
 END IF
-!---Trace
-call set_tracer(1)
-ALLOCATE(cout(npsi,6))
+ALLOCATE(cout(npsi,4))
 ALLOCATE(rout(ntheta,npsi))
 ALLOCATE(zout(ntheta,npsi))
-!$omp parallel private(j,k,psi_surf,pt,pt_rz,ptout,field,rz,gop,psi_loc,psi_gloc,cell_snap) firstprivate(pt_last)
-ALLOCATE(field,psi_loc,psi_gloc)
-psi_loc%u=>gseq%psi
-CALL psi_loc%setup(device%fe_rep)
-CALL psi_gloc%shared_setup(psi_loc)
+!---Surface flux, F and pressure
+do j=2,npsi
+  IF(do_pack)THEN
+    cout(j,1) = xr*(1.d0-(j-1)/REAL(npsi-1,8))**2 + x1
+  ELSE
+    cout(j,1) = xr*(1.d0-(j-1)/REAL(npsi-1,8)) + x1
+  END IF
+  IF(gseq%mode==0)THEN
+    cout(j,2)=gseq%ffp_scale*gseq%I%f(cout(j,1))+gseq%I%f_offset
+  ELSE
+    cout(j,2)=SIGN(1.d0,gseq%I%f_offset)*SQRT(gseq%ffp_scale*gseq%I%f(cout(j,1)) + gseq%I%f_offset**2)
+  END IF
+  cout(j,3)=gseq%p_scale*gseq%P%f(cout(j,1))/mu0
+end do
+!---Surfaces at uniform polar angle from the cut-cell quadrature (exact on the FE surface);
+!---the field-line tracer below is the deprecated method and the fallback
+cc_done=.FALSE.
+IF((qprof_backend==0).AND.(gseq%plasma_bounds(1)>-1.d98))THEN
+  ALLOCATE(psi_q(npsi-1),rzc(2,ntheta-1,npsi-1),qf(npsi-1),ok(npsi-1))
+  psi_q=(cout(2:npsi,1)-gseq%plasma_bounds(1))/(gseq%plasma_bounds(2)-gseq%plasma_bounds(1))
+  CALL gs_rays_cutcell(gseq,npsi-1,psi_q,ntheta-1,rzc,qf,ok)
+  IF(ALL(ok))THEN
+    DO j=2,npsi
+      rout(1:ntheta-1,j)=rzc(1,:,j-1); rout(ntheta,j)=rzc(1,1,j-1)
+      zout(1:ntheta-1,j)=rzc(2,:,j-1); zout(ntheta,j)=rzc(2,1,j-1)
+      cout(j,4)=cout(j,2)*qf(j-1)
+    END DO
+    cc_done=.TRUE.
+  END IF
+  DEALLOCATE(psi_q,rzc,qf,ok)
+END IF
+!---Trace
+IF(.NOT.cc_done)THEN
+call set_tracer(1)
+!$omp parallel private(j,psi_surf,pt,ptout,field,rz,gop) firstprivate(pt_last)
+ALLOCATE(field)
 field%u=>gseq%psi
 CALL field%setup(device%fe_rep)
 active_tracer%neq=3
@@ -1043,12 +1068,7 @@ do j=2,npsi
   !---------------------------------------------------------------------------
   ! Trace contour
   !---------------------------------------------------------------------------
-  IF(do_pack)THEN
-    psi_surf = xr*(1.d0-(j-1)/REAL(npsi-1,8))**2 + x1
-  ELSE
-    psi_surf = xr*(1.d0-(j-1)/REAL(npsi-1,8)) + x1
-  END IF
-  ! psi_surf(1)=x2 - psi_surf(1)
+  psi_surf = cout(j,1)
   IF(gseq%diverted.AND.ABS((psi_surf(1)-x1)/xr)<0.02d0)THEN ! Use higher tracing tolerance near divertor
     active_tracer%tol=1.d-10
   ELSE
@@ -1068,7 +1088,7 @@ do j=2,npsi
       !$omp end critical
       CYCLE
     ELSE
-      call oft_abort('Trace did not complete.','gs_save_ifile',__FILE__)
+      call oft_abort('Trace did not complete.','gs_save_decon',__FILE__)
     END IF
   END IF
   !---------------------------------------------------------------------------
@@ -1081,38 +1101,21 @@ do j=2,npsi
   rz%fs(0:active_tracer%nsteps,1) = ptout(2,1:active_tracer%nsteps+1)
   rz%fs(0:active_tracer%nsteps,2) = ptout(3,1:active_tracer%nsteps+1)
   CALL spline_fit(rz,"periodic")
-  !---Resample trace at equal geometric angle, then move each point onto the surface
-  cell_snap=0
+  !---Resample trace
   DO k=0,ntheta-1
     CALL spline_eval(rz,k/REAL(ntheta-1,8),0)
-    pt_rz=[rz%f(1),rz%f(2)]
-    CALL ifile_snap(device%mesh,psi_loc,psi_gloc,[raxis,zaxis],2.d0*pi*k/REAL(ntheta-1,8), &
-      psi_surf(1),cell_snap,pt_rz)
-    rout(k+1,j)=pt_rz(1)
-    zout(k+1,j)=pt_rz(2)
+    rout(k+1,j)=rz%f(1)
+    zout(k+1,j)=rz%f(2)
   END DO
   !---Destroy Spline
   CALL spline_dealloc(rz)
-  !---------------------------------------------------------------------------
-  ! Save DCON information
-  !---------------------------------------------------------------------------
-  cout(j,1)=psi_surf(1) ! Poloidal flux
-  !---Toroidal flux function
-  IF(gseq%mode==0)THEN
-    cout(j,2)=gseq%ffp_scale*gseq%I%f(psi_surf(1))+gseq%I%f_offset
-  ELSE
-    cout(j,2)=SIGN(1.d0,gseq%I%f_offset)*SQRT(gseq%ffp_scale*gseq%I%f(psi_surf(1)) + gseq%I%f_offset**2)
-  END IF
-  cout(j,3)=gseq%p_scale*gseq%P%f(psi_surf(1))/mu0 ! Plasma pressure
   cout(j,4)=cout(j,2)*active_tracer%v(3)/(2*pi) ! Safety Factor (q)
-  CALL ifile_derivs(gseq,psi_surf(1),cout(j,2),cout(j,5:6))
 end do
 CALL active_tracer%delete
 CALL field%delete
-CALL psi_gloc%delete()
-CALL psi_loc%delete()
-DEALLOCATE(ptout,field,psi_loc,psi_gloc)
+DEALLOCATE(ptout,field)
 !$omp end parallel
+END IF
 CALL psi_int%delete()
 IF(PRESENT(error_str))THEN
   IF(error_str/="")THEN
@@ -1130,7 +1133,6 @@ ELSE
   cout(1,2)=SIGN(1.d0,gseq%I%f_offset)*SQRT(gseq%ffp_scale*gseq%I%f(x2) + gseq%I%f_offset**2)
 END IF
 cout(1,3)=gseq%p_scale*gseq%P%f(x2)/mu0
-CALL ifile_derivs(gseq,x2,cout(1,2),cout(1,5:6))
 cout(1,4)=(cout(3,4)-cout(2,4))*(x2-cout(2,1))/(cout(3,1)-cout(2,1)) + cout(2,4)
 !---Add LCFS pressure if specified
 IF(PRESENT(lcfs_press))cout(:,3)=cout(:,3)+lcfs_press
@@ -1171,78 +1173,20 @@ ELSE
   WRITE(io_unit)zout
 END IF
 !---------------------------------------------------------------------------
-! Write out profile derivatives (after the original records)
-!
-! cout(:,5) -> F*dF/dpsi(0:npsi)
-! cout(:,6) -> dp/dpsi(0:npsi)
-!---------------------------------------------------------------------------
-DO j=5,6
-  IF(save_single)THEN
-    WRITE(io_unit)REAL(cout(:,j),4)
-  ELSE
-    WRITE(io_unit)cout(:,j)
-  END IF
-END DO
-!---------------------------------------------------------------------------
 ! Close output file
 !---------------------------------------------------------------------------
 CLOSE(io_unit)
 !---
 IF(oft_debug_print(1))THEN
   WRITE(*,'(2A,2ES11.3)')oft_indent,'Psi  = ',x1,x2
-  WRITE(*,'(2A,F7.2)')oft_indent,'Qmin = ',MINVAL(cout(:,4))
-  WRITE(*,'(2A,F7.2)')oft_indent,'Qmax = ',MAXVAL(cout(:,4))
+  WRITE(*,'(2A,F7.2)')oft_indent,'Qmin = ',MINVAL(cout(4,:))
+  WRITE(*,'(2A,F7.2)')oft_indent,'Qmax = ',MAXVAL(cout(4,:))
   ! WRITE(*,'(2A)')oft_indent,'Done'
 END IF
 CALL oft_decrease_indent
 !---
 DEALLOCATE(cout,rout,zout)
 end subroutine gs_save_ifile
-!------------------------------------------------------------------------------
-!> Move a point along the ray from the axis at angle `theta` onto the surface psi = `psi_target`
-!------------------------------------------------------------------------------
-subroutine ifile_snap(mesh,psi_int,psi_gint,axis,theta,psi_target,cell,pt)
-class(oft_bmesh), intent(inout) :: mesh !< Mesh
-type(oft_lag_brinterp), intent(inout) :: psi_int !< Flux interpolator
-type(oft_lag_bginterp), intent(inout) :: psi_gint !< Flux gradient interpolator
-real(8), intent(in) :: axis(2) !< Ray origin (magnetic axis)
-real(8), intent(in) :: theta !< Ray angle
-real(8), intent(in) :: psi_target !< Flux of the surface
-integer(4), intent(inout) :: cell !< Cell guess (updated)
-real(8), intent(inout) :: pt(2) !< Traced point (input); point on the surface (output, unchanged if not converged)
-real(8) :: e(2),rho,drho,f(3),gop(3,3),v,psi(1),gpsi(3)
-integer(4) :: i
-e=[COS(theta),SIN(theta)]
-rho=SQRT(SUM((pt-axis)**2))
-DO i=1,20
-  CALL bmesh_findcell(mesh,cell,axis+rho*e,f)
-  IF(cell==0)RETURN
-  CALL mesh%jacobian(cell,f,gop,v)
-  CALL psi_int%interp(cell,f,gop,psi)
-  CALL psi_gint%interp(cell,f,gop,gpsi)
-  drho=(psi(1)-psi_target)/DOT_PRODUCT(gpsi(1:2),e)
-  rho=rho-drho
-  IF(ABS(drho)<1.d-13*rho)THEN
-    pt=axis+rho*e
-    RETURN
-  END IF
-END DO
-end subroutine ifile_snap
-!------------------------------------------------------------------------------
-!> F*dF/dpsi and dp/dpsi at `psi` (`fval` is F there)
-!------------------------------------------------------------------------------
-subroutine ifile_derivs(gseq,psi,fval,derivs)
-class(gs_equil), intent(inout) :: gseq !< G-S object
-real(8), intent(in) :: psi !< Poloidal flux
-real(8), intent(in) :: fval !< F at psi
-real(8), intent(out) :: derivs(2) !< [F*dF/dpsi, dp/dpsi]
-IF(gseq%mode==0)THEN
-  derivs(1)=fval*gseq%ffp_scale*gseq%I%fp(psi)
-ELSE
-  derivs(1)=0.5d0*gseq%ffp_scale*gseq%I%fp(psi)
-END IF
-derivs(2)=gseq%p_scale*gseq%P%fp(psi)/mu0
-end subroutine ifile_derivs
 !---------------------------------------------------------------------------
 !> Save equilibrium to General Atomics gEQDSK file
 !------------------------------------------------------------------------------
@@ -1276,10 +1220,12 @@ INTEGER(4) :: nlim
 REAL(8), ALLOCATABLE, DIMENSION(:) :: rlim,zlim
 CHARACTER(LEN=48) :: eqdsk_case
 INTEGER(4) :: idum
-REAL(8) :: rdim,zdim,rleft,zmid,rcentr,bcentr,itor,xdum,rHFS,rLFS,zHFS,fptmp
-REAL(8), ALLOCATABLE, DIMENSION(:) :: fpol,pres,ffprim,pprime,qpsi
+REAL(8) :: rdim,zdim,rleft,zmid,rcentr,bcentr,itor,xdum,rHFS,rLFS,zHFS
+REAL(8), ALLOCATABLE, DIMENSION(:) :: fpol,pres,ffprim,pprime,qpsi,ftrace,psi_q,qf
 REAL(8), ALLOCATABLE, DIMENSION(:,:) :: psirz
-LOGICAL :: do_truncate
+REAL(8), ALLOCATABLE, DIMENSION(:,:,:) :: rzc
+LOGICAL :: do_truncate,cc_done
+LOGICAL, ALLOCATABLE, DIMENSION(:) :: ok
 !---
 device=>gseq%device
 IF(PRESENT(error_str))error_str=""
@@ -1333,11 +1279,46 @@ IF(oft_debug_print(1))THEN
   WRITE(*,'(2A,ES11.3)')oft_indent,'Rmax = ',rmax
   CALL oft_decrease_indent
 END IF
-!---Trace
-call set_tracer(1)
 ALLOCATE(rout(nr))
 ALLOCATE(zout(nr))
-!$omp parallel private(j,psi_surf,psi_trace,pt,ptout,field,fptmp) firstprivate(pt_last)
+!---Flux functions on each surface; q is evaluated on the traced surface `psi_trace`
+ALLOCATE(ftrace(nr),psi_q(nr))
+do j=1,nr
+  psi_surf = x2 - xr*((j-1)/REAL(nr-1,8))
+  psi_trace = psi_surf
+  IF((.NOT.do_truncate).AND.((psi_trace-x1)/xr<psi_pad))psi_trace = x1 + xr*psi_pad
+  psi_q(j)=psi_trace
+  IF(gseq%mode==0)THEN
+    ftrace(j)=gseq%ffp_scale*gseq%I%f(psi_trace)+gseq%I%f_offset
+    fpol(j)=gseq%ffp_scale*gseq%I%f(psi_surf)+gseq%I%f_offset
+    ffprim(j)=gseq%I%fp(psi_surf)*((gseq%ffp_scale**2)*gseq%I%f(psi_surf)+gseq%ffp_scale*gseq%I%f_offset)
+  ELSE
+    ftrace(j)=SIGN(1.d0,gseq%I%f_offset)*SQRT(gseq%ffp_scale*gseq%I%f(psi_trace) + gseq%I%f_offset**2)
+    fpol(j)=SIGN(1.d0,gseq%I%f_offset)*SQRT(gseq%ffp_scale*gseq%I%f(psi_surf) + gseq%I%f_offset**2)
+    ffprim(j)=0.5d0*gseq%ffp_scale*gseq%I%fp(psi_surf)
+  END IF
+  pres(j)=gseq%p_scale*gseq%P%f(psi_surf)/mu0
+  pprime(j)=gseq%p_scale*gseq%P%fp(psi_surf)/mu0
+end do
+!---q and the boundary contour (uniform polar angle) from the cut-cell quadrature (exact on the
+!---FE surface); the field-line tracer below is the deprecated method and the fallback
+cc_done=.FALSE.
+IF((qprof_backend==0).AND.(gseq%plasma_bounds(1)>-1.d98))THEN
+  ALLOCATE(rzc(2,nr-1,nr-1),qf(nr-1),ok(nr-1))
+  psi_q=(psi_q-gseq%plasma_bounds(1))/(gseq%plasma_bounds(2)-gseq%plasma_bounds(1))
+  CALL gs_rays_cutcell(gseq,nr-1,psi_q(2:nr),nr-1,rzc,qf,ok)
+  IF(ALL(ok))THEN
+    qpsi(2:nr)=ftrace(2:nr)*qf
+    rout(1:nr-1)=rzc(1,:,nr-1); rout(nr)=rzc(1,1,nr-1)
+    zout(1:nr-1)=rzc(2,:,nr-1); zout(nr)=rzc(2,1,nr-1)
+    cc_done=.TRUE.
+  END IF
+  DEALLOCATE(rzc,qf,ok)
+END IF
+!---Trace
+IF(.NOT.cc_done)THEN
+call set_tracer(1)
+!$omp parallel private(j,psi_surf,psi_trace,pt,ptout,field) firstprivate(pt_last)
 ALLOCATE(field)
 field%u=>gseq%psi
 CALL field%setup(device%fe_rep)
@@ -1417,28 +1398,15 @@ do j=1,nr
     CALL spline_dealloc(rz)
     DEALLOCATE(ptout)
   END IF
-  !------------------------------------------------------------------------------
-  ! Compute Mercier Profiles
-  !------------------------------------------------------------------------------
-  !---Get flux variables
-  IF(gseq%mode==0)THEN
-    fptmp=gseq%ffp_scale*gseq%I%f(psi_trace)+gseq%I%f_offset
-    fpol(j)=gseq%ffp_scale*gseq%I%f(psi_surf)+gseq%I%f_offset
-    ffprim(j)=gseq%I%fp(psi_surf)*((gseq%ffp_scale**2)*gseq%I%f(psi_surf)+gseq%ffp_scale*gseq%I%f_offset)
-  ELSE
-    fptmp=SIGN(1.d0,gseq%I%f_offset)*SQRT(gseq%ffp_scale*gseq%I%f(psi_trace) + gseq%I%f_offset**2)
-    fpol(j)=SIGN(1.d0,gseq%I%f_offset)*SQRT(gseq%ffp_scale*gseq%I%f(psi_surf) + gseq%I%f_offset**2)
-    ffprim(j)=0.5d0*gseq%ffp_scale*gseq%I%fp(psi_surf)
-  END IF
-  pres(j)=gseq%p_scale*gseq%P%f(psi_surf)/mu0
-  pprime(j)=gseq%p_scale*gseq%P%fp(psi_surf)/mu0
   !---Safety Factor (q)
-  IF(j>1)qpsi(j)=fptmp*active_tracer%v(3)/(2*pi)
+  IF(j>1)qpsi(j)=ftrace(j)*active_tracer%v(3)/(2*pi)
 end do
 CALL active_tracer%delete
 CALL field%delete()
 DEALLOCATE(field)
 !$omp end parallel
+END IF
+DEALLOCATE(ftrace,psi_q)
 IF(PRESENT(error_str))THEN
   IF(error_str/="")THEN
     DEALLOCATE(rout,zout)
