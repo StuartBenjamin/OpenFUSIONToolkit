@@ -2045,7 +2045,7 @@ def run_ITER_bootstrap_saw_internal(mesh_resolution, fe_order, mp_q):
         mygs.boot_reset()
         mygs.replace_eq(source_file='ITER_boot_state.h5')
         p_expl = mygs.solve_bootstrap(**kw, **common)
-        for key in ('total_j_phi', 'j_ind_final', 'j_bs_final', 'jphi_fixed', 'j_saw'):
+        for key in ('jphi_total', 'jphi_ind_final', 'jphi_bs_final', 'jphi_fixed', 'jphi_saw_final', 'jphi_pdriven_final'):
             if not close(p_kept[key], p_expl[key], 1e-10):
                 raise AssertionError(f"loaded state: '{key}' differs from the explicit call")
         mygs.boot_reset()
@@ -2053,7 +2053,7 @@ def run_ITER_bootstrap_saw_internal(mesh_resolution, fe_order, mp_q):
                 or mygs._tMaker_equil._boot_ops['taper_edge_jBS']:
             raise AssertionError("boot_reset() did not restore the defaults")
         p_def = mygs.solve_bootstrap(**common)
-        if np.any(p_def['jphi_fixed'] != 0.0) or np.any(p_def['j_saw'] != 0.0):
+        if np.any(p_def['jphi_fixed'] != 0.0) or np.any(p_def['jphi_saw_final'] != 0.0):
             raise AssertionError("boot_reset(): jphi_fixed / j_saw not back to zero")
     except Exception as e:
         print(e)
