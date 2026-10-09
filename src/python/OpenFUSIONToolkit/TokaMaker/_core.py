@@ -2429,7 +2429,7 @@ class TokaMaker():
             (mapped from toroidal flux if ``coord='phi_n'``)
           - ``'total_j_phi'`` Total toroidal current density = j_ind_final + j_bs_final + jphi_fixed + j_saw [A/m²]
           - ``'j_ind_final'`` Input ``ffp_prof['y']`` re-scaled and (optionally) tapered [A/m²]
-          - ``'j_bs_final'`` Bootstrap current density (optionally isolated / parametrised / tapered) [A/m²]
+          - ``'j_bs_final'`` Bootstrap current density (optionally isolated / tapered) [A/m²]
           - ``'jphi_fixed'`` Fixed current density ``jphi_fixed_prof`` (optionally tapered, zero if not set) [A/m²]
           - ``'j_saw'`` Sawtooth current: ``jphi_saw_prof`` (optionally tapered) plus the reset current [A/m²]
           - ``'saw_rho_m'``, ``'saw_rho_out'``, ``'saw_n_dips'`` Sawtooth radius (q_s + dq crossing beyond the outermost
