@@ -170,8 +170,8 @@ def _boot_state_message(boot_ops, inputs):
         if val is None:
             continue
         kept.append(key if isinstance(val, dict) else f'{key}={val!r}')
-    return ('Bootstrap state loaded with its solve_bootstrap options and keyword inputs retained '
-            '(they are reused unless passed again). Options: ' + opts + '. Keyword inputs: '
+    return ('Bootstrap state loaded with its solve_bootstrap options and keyword inputs retained. '
+            'Options: ' + opts + '. Keyword inputs: '
             + (', '.join(kept) if kept else 'none') + '. Run boot_reset() to return them to their defaults.')
 
 
