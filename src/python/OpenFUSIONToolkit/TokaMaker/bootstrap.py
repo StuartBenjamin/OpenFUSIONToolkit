@@ -876,7 +876,7 @@ def solve_with_bootstrap(mygs,
                          use_sauter_eps = True,
                          diagnose_bs = False,
                          use_python_solve = False,
-                         coord = 'psi_n',
+                         coord = None,
                          psi_N = None,
                          jphi_fixed = None,
                          p_fixed = None,
@@ -903,7 +903,8 @@ def solve_with_bootstrap(mygs,
     @param x Normalized radial grid the profiles are sampled on, in `coord` (strictly increasing,
     in [0,1]); if `None`, profiles are assumed evenly sampled on [0,1]
     @param coord Coordinate of `x`: `'psi_n'` (default, \f$\hat{\psi}\f$) or `'phi_n'`
-    (\f$\hat{\Phi}\f$, internal solver only; see `TokaMaker.solve_bootstrap`)
+    (\f$\hat{\Phi}\f$, internal solver only; see `TokaMaker.solve_bootstrap`). `None` keeps the
+    internal solver's previous/loaded value (`'psi_n'` if none)
     @param psi_N Deprecated alias of `x`
     @param use_sauter_eps If True (default), use the geometric inverse aspect ratio
       \f$\varepsilon = (R_{\max}-R_{\min})/(2\langle R\rangle)\f$ from the field-line trace.
@@ -990,7 +991,7 @@ def solve_with_bootstrap(mygs,
                     'scale_Ip' : 1.0}
         return results
     else:
-        if coord != 'psi_n':
+        if coord not in (None, 'psi_n'):
             raise ValueError("coord='%s' requires the internal solver (use_python_solve=False)" % coord)
         if jphi_fixed is not None:
             raise NotImplementedError("jphi_fixed is only supported by the internal Fortran solver (use_python_solve=False)")
