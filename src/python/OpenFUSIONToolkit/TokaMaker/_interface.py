@@ -33,7 +33,6 @@ class tokamaker_boot_ops_struct(c_struct):
     r'''! Bootstrap current options for the jphi-split-bootstrap current profile update.
 
      - `isolate_edge_jBS` Isolate the edge bootstrap spike from the bulk bootstrap current?
-     - `parameterize_jBS` Use a parametrised skew-normal fit for the edge spike? Overrides `isolate_edge_jBS` if true.
      - `scale_jBS` Scaling factor applied to the spike profile (default 1.0)
      - `djBS_tol` Threshold on relative change in j_BS to freeze bootstrap values (default 1e-4)
      - `diagnose_bs` Print alpha/Ip scalars, j_BS stats, and full profile tables each NL iteration?
@@ -42,7 +41,6 @@ class tokamaker_boot_ops_struct(c_struct):
      - `taper_edge_shape` Taper shape: 1=cos²/Hann, 2=quintic smoothstep (default), 3=cubic power
     '''
     _fields_ = [('isolate_edge_jBS', c_bool),
-                ('parameterize_jBS', c_bool),
                 ('scale_jBS', c_double),
                 ('djBS_tol', c_double),
                 ('diagnose_bs', c_bool),

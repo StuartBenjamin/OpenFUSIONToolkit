@@ -89,7 +89,6 @@ END TYPE tokamaker_recon_settings_type
 !---------------------------------------------------------------------------------
 TYPE, BIND(C) :: tokamaker_boot_ops_type
   LOGICAL(c_bool) :: isolate_edge_jBS = .FALSE.  !< Isolate edge j_BS spike
-  LOGICAL(c_bool) :: parameterize_jBS = .FALSE.  !< Overrides `isolate_edge_jBS` if true
   REAL(c_double)  :: scale_jBS = 1.0d0           !< Scaling factor for j_BS
   REAL(c_double)  :: djBS_tol = 1.0d-4            !< Threshold on rel. change in j_BS to freeze values
   LOGICAL(c_bool) :: diagnose_bs = .FALSE.        !< Print diagnostic output
@@ -615,7 +614,6 @@ SELECT TYPE(I => I_base)
 TYPE IS (jphi_bs_flux_func)
   I%boot_ops%initialized = .TRUE.
   I%boot_ops%isolate_edge_jBS = bops%isolate_edge_jBS
-  I%boot_ops%parameterize_jBS = bops%parameterize_jBS
   I%boot_ops%scale_jBS = bops%scale_jBS
   I%boot_ops%djBS_tol = bops%djBS_tol
   I%boot_ops%diagnose_bs = bops%diagnose_bs
@@ -645,7 +643,6 @@ SELECT TYPE(I => I_base)
 TYPE IS (jphi_bs_flux_func)
   initialized = I%boot_ops%initialized
   bops%isolate_edge_jBS = I%boot_ops%isolate_edge_jBS
-  bops%parameterize_jBS = I%boot_ops%parameterize_jBS
   bops%scale_jBS = I%boot_ops%scale_jBS
   bops%djBS_tol = I%boot_ops%djBS_tol
   bops%diagnose_bs = I%boot_ops%diagnose_bs

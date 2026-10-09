@@ -268,8 +268,7 @@ if run_internal:
         ni_prof={'type': 'linterp', 'x': psi_sample, 'y': ni},
         Zeff=Zeff_val,
         Ip_target=Ip_target,
-        isolate_edge_jBS=args.isolate_edge,
-        parameterize_jBS=args.parameterize_edge,
+        isolate_edge_jBS=args.isolate_edge or args.parameterize_edge,  # parameterize_jBS: Python solver only
         scale_jBS=args.scale_jBS,
         diagnose_bs=args.diagnose_bs,
         taper_edge_jBS=args.taper_edge,

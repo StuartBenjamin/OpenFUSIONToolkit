@@ -897,7 +897,7 @@ def solve_with_bootstrap(mygs,
     @param psi_pad Padding for flux surface calculations
     @param iterations Number of solver iterations
     @param diagnostic_plots If True, plot diagnostic figures
-    @param parameterize_jBS If True, use parameterized edge spike
+    @param parameterize_jBS If True, use parameterized edge spike (Python solver only)
     @param use_OMFIT_sauter If True, use OMFIT Sauter model
     @param x Normalized radial grid the profiles are sampled on, in `coord` (strictly increasing,
     in [0,1]); if `None`, profiles are assumed evenly sampled on [0,1]
@@ -944,6 +944,8 @@ def solve_with_bootstrap(mygs,
             )
         if inductive_jphi is None:
             raise ValueError("inductive_jphi must be provided for method='internal'")
+        if parameterize_jBS:
+            raise ValueError("parameterize_jBS is only supported by the Python solver (use_python_solve=True)")
         _ne   = ne if isinstance(ne, dict) else _default_profile(ne, 'ne', x=x)
         _Te   = Te if isinstance(Te, dict) else _default_profile(Te, 'Te', x=x, scale=1e-3)
         _ni   = ni if isinstance(ni, dict) else _default_profile(ni, 'ni', x=x)
@@ -964,7 +966,6 @@ def solve_with_bootstrap(mygs,
             p_fixed_prof=_pfix,
             scale_jBS=scale_jBS,
             isolate_edge_jBS=isolate_edge_jBS,
-            parameterize_jBS=parameterize_jBS,
             diagnose_bs=diagnose_bs,
             coord=coord,
             **kwargs
