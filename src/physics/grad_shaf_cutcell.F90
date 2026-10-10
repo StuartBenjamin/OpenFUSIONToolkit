@@ -8,14 +8,9 @@
 !> Mesh-based (cut-cell) flux-surface quadrature: \f$ q/F \f$, flux-surface averages, surface
 !! extrema and surface points at given polar angles, exact on the FE level sets
 !!
-!! In each plasma cell \f$ \hat{\psi} \f$ is a degree-p polynomial in the logical
-!! coordinates \f$ (u,v) = (\lambda_2,\lambda_3) \f$, held in Bernstein form. Cells are
-!! split recursively until \f$ \hat{\psi} \f$ is strictly monotone along a fixed direction
-!! \f$ d \f$ with monotone edge restrictions. Each level-set arc is then a graph over
-!! \f$ \xi = e \cdot x \f$ (\f$ e \perp d \f$) between exact edge crossings, and
-!! \f$ dl/|\nabla \psi| = |J| d\xi / |\partial_d \psi| \f$ (coarea formula in logical space).
-!! Arc points are exact roots of the FE \f$ \hat{\psi} \f$ along \f$ d \f$, so the result is
-!! smooth in \f$ \psi \f$ up to Gauss quadrature error.
+!! Cells are split (Bernstein form) until \f$ \hat{\psi} \f$ is monotone along a direction \f$ d \f$;
+!! each level-set arc is then a graph between exact edge crossings, integrated by Gauss quadrature
+!! with \f$ dl/|\nabla \psi| = |J| d\xi / |\partial_d \psi| \f$.
 !!
 !! @ingroup doxy_oft_physics
 !------------------------------------------------------------------------------
@@ -41,12 +36,13 @@ TYPE :: bern_tab
   REAL(r8), ALLOCATABLE :: mvinv(:,:) !< Uniform-lattice values to monomial coefficients [nb,nb]
   REAL(r8) :: cbound = 0.d0 !< Coefficients lie within nodal range extended by `cbound` times its width
 END TYPE bern_tab
+TYPE(bern_tab), SAVE :: bt_cache !< Tables of the last degree used (built once per degree)
 INTEGER(i4), PARAMETER :: nblk_cells = 64 !< Cells per deterministic accumulation block
 INTEGER(i4), PARAMETER :: max_depth = 12 !< Maximum subdivision depth
 REAL(r8), PARAMETER :: kappa = 0.25d0 !< Required min/max ratio of \f$ \partial_d \hat{\psi} \f$ per sub-cell
 REAL(r8), PARAMETER :: wind_tol = 1.d-2 !< Tolerance on winding number about O-point
 REAL(r8), PARAMETER :: ray_slack = 1.d-10 !< Angular slack (rad) when assigning a polar angle to an arc
-REAL(r8), PARAMETER :: smooth_ratio = 0.9d0 !< Min/max \f$ \partial_d \hat{\psi} \f$ ratio above which 3 Gauss points are used (else 5)
+REAL(r8), PARAMETER :: smooth_ratio = 0.9d0 !< Min/max d psi/d d ratio above which 3 Gauss points are used (else 5)
 REAL(r8), PARAMETER :: xg3(3) = [-0.774596669241483377035853d0,0.d0,0.774596669241483377035853d0]
 REAL(r8), PARAMETER :: wg3(3) = [0.555555555555555555555556d0,0.888888888888888888888889d0, &
   0.555555555555555555555556d0]
@@ -99,11 +95,11 @@ class(gs_equil), intent(inout) :: gseq !< G-S object
 integer(i4), intent(in) :: nr !< Number of surfaces
 real(r8), intent(in) :: psi_q(nr) !< Surface locations (0 at LCFS, 1 at axis)
 real(r8), intent(out) :: qf(nr) !< \f$ q/F \f$
-real(r8), intent(out) :: ravgs(nr,4) !< \f$ \langle R \rangle \f$, \f$ \langle 1/R \rangle \f$, \f$ \langle 1/R^2 \rangle \f$, \f$ dV/d\psi \f$
+real(r8), intent(out) :: ravgs(nr,4) !< <R>, <1/R>, <1/R^2>, dV/dpsi
 logical, intent(out) :: ok(nr) !< Surface inside (0,1) and closed about the O-point
 real(r8), optional, intent(in) :: fpol(nr) !< F on each surface (with `fsa`)
-real(r8), optional, intent(out) :: fsa(nr,4) !< \f$ \langle |\nabla\psi| \rangle \f$, \f$ \langle |\nabla\psi|^2 \rangle \f$, \f$ \langle B_p^2 \rangle \f$, \f$ \langle 1/B^2 \rangle \f$
-real(r8), optional, intent(out) :: shp(nr,6) !< \f$ R_{min} \f$, \f$ R_{max} \f$, \f$ Z_{min} \f$, \f$ Z_{max} \f$, \f$ R(Z_{min}) \f$, \f$ R(Z_{max}) \f$
+real(r8), optional, intent(out) :: fsa(nr,4) !< <|grad psi|>, <|grad psi|^2>, <B_p^2>, <1/B^2>
+real(r8), optional, intent(out) :: shp(nr,6) !< R_min, R_max, Z_min, Z_max, R(Z_min), R(Z_max)
 real(r8) :: wind(nr),racc(3,nr),dpsi
 real(r8), allocatable :: facc(:,:),xacc(:,:,:)
 integer(i4) :: k
@@ -142,12 +138,8 @@ end subroutine gs_fsa_cutcell
 !> Points of flux surfaces at uniform polar angle about the O-point, and \f$ q/F \f$ (and optionally
 !! the surface extrema) by the same quadrature
 !!
-!! The inverse-coordinate counterpart of @ref tracing_2d::tracinginv_fs: `rz(:,k,i)` is the
-!! intersection of surface `i` with the ray from the O-point at angle \f$ 2\pi(k-1)/n_\theta \f$
-!! (from the +R direction, anticlockwise), exact on the FE surface. Each arc owns the angles inside
-!! its angular span and solves for the intersection on the arc. A surface is `ok` only if it is
-!! closed about the O-point, star-shaped about it (the polar angle never decreases along it), and
-!! every angle has an intersection. Results do not depend on the thread count.
+!! Cut-cell counterpart of @ref tracing_2d::tracinginv_fs: `rz(:,k,i)` is surface `i` on the ray at angle
+!! \f$ 2\pi(k-1)/n_\theta \f$ from +R; `ok(i)` false unless the surface is closed and star-shaped about the O-point.
 !------------------------------------------------------------------------------
 subroutine gs_rays_cutcell(gseq,nr,psi_q,nth,rz,qf,ok,xa)
 class(gs_equil), intent(inout) :: gseq !< G-S object
@@ -364,7 +356,7 @@ real(r8), optional, intent(in) :: bref(nr) !< \f$ B_{ref} \f$ on each surface (S
 real(r8), optional, intent(inout) :: aloc(:,:) !< Accumulated Sauter sums [8,nr] (see @ref gs_sauter_cutcell)
 real(r8), optional, intent(inout) :: eloc(:) !< Accumulated \f$ B_{max} \f$ [nr]
 real(r8), optional, intent(inout) :: racc(:,:) !< Accumulated \f$ \oint w\,[R, R^2, 1] \f$ [3,nr] (see @ref geom_sums)
-real(r8), optional, intent(inout) :: facc(:,:) !< Accumulated \f$ \oint w R\,[1, |\nabla\psi|, |\nabla\psi|^2, B_p^2, 1/B^2] \f$ [5,nr] (needs `fpol`)
+real(r8), optional, intent(inout) :: facc(:,:) !< Accumulated oint w R [1, |grad psi|, |grad psi|^2, B_p^2, 1/B^2] [5,nr] (needs `fpol`)
 real(r8), optional, intent(inout) :: xacc(:,:,:) !< Accumulated surface extrema [2,4,nr] (see @ref ext_add)
 real(r8), optional, intent(inout) :: tacc(:,0:,:) !< Accumulated ray points [3,0:nth,nr] (see @ref arc_rays)
 type(oft_scalar_bfem), pointer :: lag_rep
@@ -583,12 +575,7 @@ x=c+eta*dvec
 end function arc_point
 !---Extrema of R and Z on the current arc of surface s, added to `xa`
 !!
-!! A smooth arc of a level set has stationary R where \f$ \partial_Z \psi = 0 \f$ and stationary
-!! Z where \f$ \partial_R \psi = 0 \f$; the FE surface is only C0 across cells, so the candidates
-!! are the arc ends (exact edge crossings), the Gauss points, and the roots of these gradient
-!! components bracketed by neighbouring samples (Illinois regula falsi on xi). The gradient
-!! stays within a half-plane on a simple sub-cell, so a convex arc has at most one root of each
-!! and none is missed; on an inflected arc a missed root pair bounds an O(h^2) excursion.
+!! Candidates: arc ends, Gauss points, and bracketed roots of \f$ \partial_Z \psi \f$ / \f$ \partial_R \psi \f$.
 subroutine arc_extrema(s,p1,p2,xi1,xi2,ng,xs,sp,sg,xa)
 real(r8), intent(in) :: s,p1(2),p2(2),xi1,xi2
 integer(i4), intent(in) :: ng
@@ -975,14 +962,26 @@ perm_rep=>lag_rep
 perm_sum=chk
 end subroutine perm_update
 !------------------------------------------------------------------------------
-!> Build Bernstein tables for degree `p` (1-4)
+!> Bernstein tables for degree `p` (1-4), built on first use of each degree
 !------------------------------------------------------------------------------
 subroutine bern_setup(bt,p)
 type(bern_tab), intent(inout) :: bt
 integer(i4), intent(in) :: p
+IF(bt_cache%p/=p)THEN
+  IF(ALLOCATED(bt_cache%mi))DEALLOCATE(bt_cache%mi,bt_cache%mi1,bt_cache%lk,bt_cache%vinv,bt_cache%mvinv)
+  CALL bern_build(bt_cache,p)
+END IF
+bt=bt_cache
+end subroutine bern_setup
+!------------------------------------------------------------------------------
+!> Build Bernstein tables for degree `p` (1-4)
+!------------------------------------------------------------------------------
+subroutine bern_build(bt,p)
+type(bern_tab), intent(inout) :: bt
+integer(i4), intent(in) :: p
 real(r8) :: v(15,15),fact(0:4),mult(15),x
 integer(i4) :: n,m,a2,a3,k,ierr
-IF((p<1).OR.(p>4))CALL oft_abort('Unsupported FE order','bern_setup',__FILE__)
+IF((p<1).OR.(p>4))CALL oft_abort('Unsupported FE order','bern_build',__FILE__)
 bt%p=p
 bt%nb=(p+1)*(p+2)/2
 bt%nb1=p*(p+1)/2
@@ -1021,7 +1020,7 @@ DO m=1,bt%nb
 END DO
 ALLOCATE(bt%vinv,SOURCE=v(1:bt%nb,1:bt%nb))
 CALL lapack_matinv(bt%nb,bt%vinv,ierr)
-IF(ierr/=0)CALL oft_abort('Bernstein table inversion failed','bern_setup',__FILE__)
+IF(ierr/=0)CALL oft_abort('Bernstein table inversion failed','bern_build',__FILE__)
 !---Monomials u^a2 v^a3 on the uniform lattice
 DO m=1,bt%nb
   DO n=1,bt%nb
@@ -1030,7 +1029,7 @@ DO m=1,bt%nb
 END DO
 ALLOCATE(bt%mvinv,SOURCE=v(1:bt%nb,1:bt%nb))
 CALL lapack_matinv(bt%nb,bt%mvinv,ierr)
-IF(ierr/=0)CALL oft_abort('Monomial table inversion failed','bern_setup',__FILE__)
+IF(ierr/=0)CALL oft_abort('Monomial table inversion failed','bern_build',__FILE__)
 bt%cbound=(MAXVAL(SUM(ABS(bt%vinv),DIM=2))-1.d0)/2.d0+1.d-12
-end subroutine bern_setup
+end subroutine bern_build
 END MODULE oft_gs_cutcell

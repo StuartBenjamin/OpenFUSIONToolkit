@@ -425,6 +425,7 @@ def solve_jphi(mygs,ffp_prof,pp_prof,Ip_target,pax_target, F0=None):
     @param pp_prof Pressure gradient profile (\f$P'\f$)
     @param Ip_target Target plasma current \f$I_p\f$ [A]
     @param pax_target Target on-axis pressure \f$p_{axis}\f$ [Pa]
+    @param F0 Vacuum \f$F = R_0 B_0\f$ passed to `set_profiles` as `foffset` (default: keep the current value)
     @result None (updates equilibrium in-place)
     '''
 
@@ -741,7 +742,7 @@ def redl_bootstrap(
     X32_ee = fT / (1 + dee_2 + dee_3)
     F32_ee = (
         (0.1 + 0.6 * Zeff)
-        / (Zeff * (0.77 + 0.63 * (1 + (Zeff - 1)**1.1)))
+        / (Zeff * (0.77 + 0.63 * (1 + numpy.maximum(Zeff - 1, 0)**1.1)))
         * (X32_ee - X32_ee**4)
         + 0.7 / (1 + 0.2 * Zeff)
         * (X32_ee**2 - X32_ee**4 - 1.2 * (X32_ee**3 - X32_ee**4))
@@ -954,6 +955,7 @@ def solve_with_bootstrap(mygs,
     @param diagnostic_plots If True, plot diagnostic figures
     @param parameterize_jbs If True, use parameterized edge spike; Python solver only (was `parameterize_jBS`, deprecated)
     @param use_OMFIT_sauter If True, use OMFIT Sauter model
+    @param verbose Print iteration progress (Python solver only)
     @param x Normalized radial grid the profiles are sampled on, in `coord` (strictly increasing,
     in [0,1]); if `None`, profiles are assumed evenly sampled on [0,1]
     @param coord Coordinate of `x`: `'psi_n'` (default, \f$\hat{\psi}\f$) or `'phi_n'`
@@ -963,8 +965,10 @@ def solve_with_bootstrap(mygs,
     @param use_sauter_eps If True (default), use the geometric inverse aspect ratio
       \f$\varepsilon = (R_{\max}-R_{\min})/(R_{\max}+R_{\min})\f$ of each surface (`TokaMaker.sauter_fc`).
       If False, use the formula \f$\varepsilon = \langle a\rangle / \langle R\rangle\f$.
-    @param diagnose_bs If True, print the 7 edge-spike fit parameters and the
-      parameterized spike profile table to stdout (mirroring the Fortran --diagnose-bs output).
+    @param diagnose_bs If True, print per-iteration diagnostics (internal solver: see `TokaMaker.solve_bootstrap`;
+      Python solver with `parameterize_jbs`: the 7 edge-spike fit parameters and spike table)
+    @param use_python_solve If True, run the deprecated Python iteration; else (default) forward to
+      `TokaMaker.solve_bootstrap` (internal Fortran solver)
     @param jphi_fixed Fixed toroidal current density \f$j_{fixed}\f$ [A/m$^2$] on `x` (array or profile dict),
       added to the total without rescaling (internal Fortran solver only)
     @param F0 Vacuum \f$F(\psi)\f$ value (B0*R0), passed to the solver (default: keep the current value)
@@ -1052,9 +1056,8 @@ def solve_with_bootstrap(mygs,
             raise NotImplementedError("jphi_saw / saw_q_s are only supported by the internal Fortran solver (use_python_solve=False)")
 
     warn(
-        "The python solve_with_bootstrap() is deprecated by mygs.solve_bootstrap() (internal fortran-solve)."
-        "Set use_python_solve = True to retain the original Python-based bootstrap calculation, otherwise "
-        "solve_with_bootstrap passes arguments to solve_bootstrap()",
+        "The Python bootstrap solve (use_python_solve=True) is deprecated; use mygs.solve_bootstrap() "
+        "(internal solver), which solve_with_bootstrap() calls by default.",
         DeprecationWarning,
         stacklevel=2,
     )
@@ -1189,7 +1192,7 @@ def solve_with_bootstrap(mygs,
                     nu_e_star_override=nu_e_star,
                     nu_i_star_override=nu_i_star,
                     use_legacy_L34=False, # L34 = L31 (correct Redl 2021)
-                    use_sign_q=True, # convention-dependent
+                    use_sign_q=False, # <j.B> is odd in F through I_psi
                     formula_form='jboot1', # no d(ln ne)=d(ln ni) assumption
                 )
 

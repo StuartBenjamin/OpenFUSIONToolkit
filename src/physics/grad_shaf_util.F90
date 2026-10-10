@@ -27,7 +27,7 @@ USE oft_blag_operators, ONLY: oft_blag_project, oft_lag_brinterp, oft_lag_bginte
 USE tracing_2d, ONLY: active_tracer, tracinginv_fs, set_tracer
 USE mhd_utils, ONLY: mu0
 USE oft_gs, ONLY: gs_factory, flux_func, gs_dflux, gs_itor_nl, gs_test_bounds, gs_b_interp, &
-  gsinv_interp, gs_psi2r, gs_psi2pt, gs_epsilon, gs_update_bounds, gs_bcrosskappa, qprof_backend
+  gsinv_interp, gs_psi2r, gs_psi2pt, gs_epsilon, gs_update_bounds, gs_bcrosskappa, qprof_backend, gs_fpol
 USE oft_gs_cutcell, ONLY: gs_rays_cutcell
 USE oft_gs_profiles
 USE grad_shaf_prof_phys, ONLY: jphi_flux_func
@@ -484,6 +484,7 @@ integer(i4), allocatable :: dim_sizes(:)
 REAL(r8) :: pt_tmp(2),scale_tmp,diff_val
 real(r8), pointer :: vals_tmp(:)
 logical :: success,pm_save,logical_tmp,restored
+CLASS(flux_func), POINTER :: I_base
 CHARACTER(LEN=:), ALLOCATABLE :: profType
 error_string=''
 ! CALL hdf5_write(self%device%fe_rep%mesh%r,filename,'mesh/R')
@@ -922,12 +923,13 @@ END IF
 CALL torflux_setup(self,resettle=.TRUE.)
 IF(ASSOCIATED(self%torflux))CALL self%torflux%update(self)
 restored=.FALSE.
-SELECT TYPE(I=>self%I)
+I_base=>torflux_unwrap(self%I)
+SELECT TYPE(I=>I_base)
   TYPE IS(jphi_bs_flux_func)
     restored=I%ffp_restored
 END SELECT
 IF(restored)THEN
-  self%I%plasma_bounds=self%plasma_bounds
+  CALL torflux_set_bounds(self%I,self%plasma_bounds)
 ELSE
   CALL self%I%update(self)
 END IF
@@ -936,11 +938,19 @@ IF(ASSOCIATED(self%I_NI))CALL self%I_NI%update(self)
 IF(ASSOCIATED(self%eta))CALL self%eta%update(self)
 end subroutine gs_load_tokamaker
 !---------------------------------------------------------------------------
-!> Needs docs
+!> Save an inverse-equilibrium (flux-coordinate) file, Fortran unformatted
+!!
+!! Surfaces at uniform polar angle about the O-point from the cut-cell quadrature (tracer as fallback).
+!! Records (r8, or r4 if @p single_prec):
+!! 1. npsi, ntheta (i4)
+!! 2-5. psi, F, p, q on the npsi flux points
+!! 6-7. R(ntheta,npsi), Z(ntheta,npsi)
+!! 8-9. F*dF/dpsi, dp/dpsi (only if @p profile_derivs)
+!! 10. [psi_axis, psi_LCFS], unpadded (only if @p psi_bounds)
 !---------------------------------------------------------------------------
 subroutine gs_save_ifile(gseq,filename,npsi,ntheta,psi_pad,lcfs_press,pack_lcfs,single_prec,profile_derivs,psi_bounds,error_str)
 class(gs_equil), intent(inout) :: gseq !< G-S object
-CHARACTER(LEN=OFT_PATH_SLEN), intent(in) :: filename !< Outpute filename
+CHARACTER(LEN=OFT_PATH_SLEN), intent(in) :: filename !< Output filename
 integer(4), intent(in) :: npsi !< Number of points in flux coordinate
 integer(4), intent(in) :: ntheta !< Number of points in poloidal coordinate
 REAL(8), intent(in) :: psi_pad !< Padding at LCFS in normalized units
@@ -949,7 +959,7 @@ LOGICAL, OPTIONAL, INTENT(in) :: pack_lcfs !< Use quadratic packing toward LCFS?
 LOGICAL, OPTIONAL, INTENT(in) :: single_prec !< Save file with single precision fields?
 LOGICAL, OPTIONAL, INTENT(in) :: profile_derivs !< Append F*dF/dpsi and dp/dpsi records? (extends the format)
 LOGICAL, OPTIONAL, INTENT(in) :: psi_bounds !< Append the unpadded [psi_axis, psi_LCFS] record? (extends the format)
-CHARACTER(LEN=OFT_ERROR_SLEN), OPTIONAL, INTENT(out) :: error_str
+CHARACTER(LEN=OFT_ERROR_SLEN), OPTIONAL, INTENT(out) :: error_str !< Error message (empty on success)
 type(gsinv_interp), pointer :: field
 type(oft_lag_brinterp) :: psi_int
 real(8) :: gop(3,3),psi_surf(1),pt_last(3)
@@ -1029,11 +1039,7 @@ do j=2,npsi
   ELSE
     cout(j,1) = xr*(1.d0-(j-1)/REAL(npsi-1,8)) + x1
   END IF
-  IF(gseq%mode==0)THEN
-    cout(j,2)=gseq%ffp_scale*gseq%I%f(cout(j,1))+gseq%I%f_offset
-  ELSE
-    cout(j,2)=SIGN(1.d0,gseq%I%f_offset)*SQRT(gseq%ffp_scale*gseq%I%f(cout(j,1)) + gseq%I%f_offset**2)
-  END IF
+  cout(j,2)=gs_fpol(gseq,cout(j,1))
   cout(j,3)=gseq%p_scale*gseq%P%f(cout(j,1))/mu0
   CALL ifile_derivs(gseq,cout(j,1),cout(j,2),cout(j,5:6))
 end do
@@ -1335,13 +1341,11 @@ do j=1,nr
   psi_trace = psi_surf
   IF((.NOT.do_truncate).AND.((psi_trace-x1)/xr<psi_pad))psi_trace = x1 + xr*psi_pad
   psi_q(j)=psi_trace
+  ftrace(j)=gs_fpol(gseq,psi_trace)
+  fpol(j)=gs_fpol(gseq,psi_surf)
   IF(gseq%mode==0)THEN
-    ftrace(j)=gseq%ffp_scale*gseq%I%f(psi_trace)+gseq%I%f_offset
-    fpol(j)=gseq%ffp_scale*gseq%I%f(psi_surf)+gseq%I%f_offset
     ffprim(j)=gseq%I%fp(psi_surf)*((gseq%ffp_scale**2)*gseq%I%f(psi_surf)+gseq%ffp_scale*gseq%I%f_offset)
   ELSE
-    ftrace(j)=SIGN(1.d0,gseq%I%f_offset)*SQRT(gseq%ffp_scale*gseq%I%f(psi_trace) + gseq%I%f_offset**2)
-    fpol(j)=SIGN(1.d0,gseq%I%f_offset)*SQRT(gseq%ffp_scale*gseq%I%f(psi_surf) + gseq%I%f_offset**2)
     ffprim(j)=0.5d0*gseq%ffp_scale*gseq%I%fp(psi_surf)
   END IF
   pres(j)=gseq%p_scale*gseq%P%f(psi_surf)/mu0

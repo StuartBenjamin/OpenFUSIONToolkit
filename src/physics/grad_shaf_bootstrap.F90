@@ -5,7 +5,7 @@
 !---------------------------------------------------------------------------------
 !> @file grad_shaf_bootstrap.F90
 !
-!> Physics-scripts used in the bootstrap calculation inside the Grad-Sharfranov solve
+!> Bootstrap current and sawtooth reset for the jphi-split-bootstrap Grad-Shafranov profile
 !!
 !! @authors Stuart Benjamin, fortranisation of Daniel Burgess' bootstrap.py
 !! @date June 2026
@@ -14,7 +14,7 @@
 module grad_shaf_bootstrap
 use oft_base
 use oft_gs, only: gs_equil, flux_func, gsinv_interp, gs_factory, gs_psi2r, &
- gs_itor_nl, qprof_trace_tol
+ gs_itor_nl, qprof_trace_tol, gs_fpol
 use oft_gs_profiles, only: torflux_qgeom_backend
 use oft_gs_cutcell, only: gs_sauter_cutcell, gs_qgeom_cutcell
 use oft_lag_basis, only: oft_blag_geval
@@ -28,19 +28,15 @@ USE oft_io, ONLY: hdf5_create_group, hdf5_write, hdf5_read, &
 use mhd_utils, only: mu0
 implicit none
 !------------------------------------------------------------------------------
-!> Read-in options for the jphi-split-bootstrap current profile update.
-!!
-!! Must be initialised (via @ref tokamaker_set_boot_ops) before
-!! running TokaMaker with a `jphi-split-bootstrap` current profile.  Fields
-!! correspond to the optional arguments of @ref calculate_bootstrap.
+!> Options of @ref jphi_bs_update (defaults apply unless set via @ref tokamaker_set_boot_ops)
 !------------------------------------------------------------------------------
 TYPE :: boot_ops
   LOGICAL :: initialized = .FALSE. !< Options have been explicitly set?
   LOGICAL :: isolate_edge_jbs = .FALSE. !< Isolate edge bootstrap spike from bulk?
   REAL(r8) :: scale_jbs = 1.0_r8 !< Scaling factor applied to the bootstrap current (default 1)
-  REAL(r8) :: djbs_tol = 1.0e-4_r8 !< Threshold on rel. change in bootstrap current to stop recalculation (increasing solve speed)
+  REAL(r8) :: djbs_tol = 1.0e-4_r8 !< Rel. change in jphi_bs below which it is frozen (not recomputed)
   LOGICAL :: diagnose_bs = .FALSE. !< Print alpha/Ip scalars, bootstrap stats, and full profile tables each NL iteration
-  LOGICAL :: taper_edge_jbs = .FALSE. !< Smooth taper of toroidal current (inductive, bootstrap and fixed) to zero at plasma edge (guards against numerical issues at the separatrix)
+  LOGICAL :: taper_edge_jbs = .FALSE. !< Taper all current components (jphi_ind, _bs, _pd, _fixed, _saw) to zero at the LCFS
   REAL(r8) :: taper_edge_psi0 = 0.999_r8 !< psi_N (standard: 0=axis, 1=LCFS) where edge taper begins
   INTEGER(i4) :: taper_edge_shape = 2 !< Edge taper shape: 1=cos² (Hann), 2=quintic smoothstep, 3=cubic power
   REAL(r8) :: saw_q_s = 0.0_r8 !< Sawtooth reset q on axis (q_s); 0 = off (see @ref saw_reset_1d)
@@ -60,7 +56,7 @@ TYPE :: boot_profs
   REAL(r8), ALLOCATABLE :: psi_n(:) !< Normalised psi of the profile nodes, LCFS first
   REAL(r8), ALLOCATABLE :: jdotB_bs_raw(:) !< Redl PoP 2021 <j_BS.B>
   REAL(r8), ALLOCATABLE :: jphi_bs_raw(:) !< Bootstrap jphi, <j_BS.B> F<1/R>/<B^2> + jphi_pd_raw
-  REAL(r8), ALLOCATABLE :: jphi_pd_raw(:) !< Pressure-driven (diamagnetic + Pfirsch-Schlueter) part of jphi_bs_raw, P'(<R> - F^2<1/R>/<B^2>)
+  REAL(r8), ALLOCATABLE :: jphi_pd_raw(:) !< Pressure-driven (diamagnetic + Pfirsch-Schlueter) part, P'(<R> - F^2<1/R>/<B^2>)
   REAL(r8), ALLOCATABLE :: jphi_total(:) !< Total = jphi_ind + jphi_bs + jphi_saw + jphi_fixed
   REAL(r8), ALLOCATABLE :: jphi_bs(:) !< Bootstrap jphi, scaled, optionally isolated and tapered
   REAL(r8), ALLOCATABLE :: jphi_pd(:) !< jphi_pd_raw scaled and optionally tapered (not isolated)
@@ -75,25 +71,25 @@ END TYPE boot_profs
 CHARACTER(LEN=16), PARAMETER :: boot_prof_names(10) = [CHARACTER(LEN=16) :: 'psi_n', 'jdotB_bs_raw', &
   'jphi_bs_raw', 'jphi_pd_raw', 'jphi_total', 'jphi_bs', 'jphi_pd', 'jphi_ind', &
   'jphi_saw', 'jphi_fixed']
+REAL(r8), PARAMETER :: djbs_stol = 1.0e-3_r8 !< Stagnation tolerance: a stalled change above this resets the no-improve counter
+REAL(r8), PARAMETER :: dalpha_warn_tol = 1.0e-6_r8 !< Relative (|dalpha|/|alpha|): no alpha stall warning below this
 !------------------------------------------------------------------------------
 !> Jphi flux function type for bootstrap current calculation
 !------------------------------------------------------------------------------
 type, extends(jphi_flux_func) :: jphi_bs_flux_func
   real(8) :: alpha_last = 1.d0 !< Alpha (input Jphi rescaling factor) from previous NL iteration
-  logical :: freeze_jbs = .FALSE. !< Set .TRUE. once jphi_bs converges or stagnates; skips the Sauter pass (big speedup)
-  real(8) :: djbs_stol = 1.0e-3_r8 !< Stagnation tolerance: a stalled change above this resets the no-improve counter
-  real(8) :: dalpha_warn_tol = 1.0e-6_r8 !< Relative (|dalpha|/|alpha|): no alpha stall warning below this
+  logical :: freeze_jbs = .FALSE. !< jphi_bs converged or stagnated: skip the Sauter pass
   integer(4) :: djbs_no_improve = 0   !< Consecutive steps with non-decreasing djbs
   real(8) :: djbs_min = huge(1.0d0)  !< Running minimum djbs seen so far
   integer(4) :: dalpha_no_improve = 0 !< Consecutive steps with non-decreasing dalpha
   real(8) :: dalpha_last = huge(1.0d0) !< dalpha of the previous update (stall diagnostic)
-  real(8), allocatable :: jphi_bs_last(:) !< Scaled, untapered jphi_bs of the last bootstrap evaluation (mu0*A/m²; freeze check and cache)
+  real(8), allocatable :: jphi_bs_last(:) !< Scaled, untapered jphi_bs of the last evaluation (mu0*A/m²)
   real(8), allocatable :: jphi_pd_last(:) !< Its pressure-driven part (mu0*A/m²)
   logical :: freeze_saw = .FALSE. !< Set .TRUE. once jphi_saw converges or stagnates, after jphi_bs is frozen
   integer(4) :: djsaw_no_improve = 0 !< Consecutive steps with non-decreasing djsaw
   real(8) :: djsaw_min = huge(1.0d0) !< Running minimum djsaw
   real(8), allocatable :: jphi_saw_last(:) !< jphi_saw of the last update (mu0*A/m²)
-  real(8), allocatable :: jphi_total_last(:) !< jphi_total of the last update (mu0*A/m²), the current of the equilibrium being traced
+  real(8), allocatable :: jphi_total_last(:) !< jphi_total of the last update (mu0*A/m²)
   logical :: ffp_restored = .FALSE. !< F*F' knots were read from a file, so loading keeps them instead of updating
   TYPE(boot_ops) :: boot_ops       !< Options set from Python (@ref tokamaker_set_boot_ops)
   TYPE(boot_profs) :: boot_profs   !< Current profiles of the last update
@@ -135,7 +131,7 @@ subroutine jphi_bs_save_hdf5(self,filename,path)
 class(jphi_bs_flux_func), intent(inout) :: self
 character(LEN=*), intent(in) :: filename
 character(LEN=*), intent(in) :: path
-CALL hdf5_write('jphi-split-bootstrap',filename,path//'/TYPE')
+IF(.NOT.hdf5_field_exist(filename,path//'/TYPE'))CALL hdf5_write('jphi-split-bootstrap',filename,path//'/TYPE')
 CALL hdf5_write(self%npsi,filename,path//'/NPSI')
 CALL hdf5_write(self%x,filename,path//'/XVALS')
 CALL hdf5_write(self%jphi,filename,path//'/YVALS')
@@ -298,8 +294,6 @@ SELECT TYPE(new)
   CLASS IS(jphi_bs_flux_func)
     new%alpha_last = self%alpha_last
     new%freeze_jbs = self%freeze_jbs
-    new%djbs_stol = self%djbs_stol
-    new%dalpha_warn_tol = self%dalpha_warn_tol
     new%djbs_no_improve = self%djbs_no_improve
     new%djbs_min = self%djbs_min
     new%dalpha_no_improve = self%dalpha_no_improve
@@ -345,7 +339,17 @@ self%djsaw_no_improve = 0
 self%djsaw_min = HUGE(1.0d0)
 IF(ALLOCATED(self%jphi_saw_last))DEALLOCATE(self%jphi_saw_last)
 IF(ALLOCATED(self%jphi_total_last))DEALLOCATE(self%jphi_total_last)
+CALL saw_scalars_reset(self%boot_profs)
 end subroutine reset_solve_state
+!------------------------------------------------------------------------------
+!> Zero the sawtooth scalars of @ref boot_profs (no reset)
+!------------------------------------------------------------------------------
+subroutine saw_scalars_reset(bp)
+TYPE(boot_profs), INTENT(inout) :: bp
+bp%saw_rho_m = 0.0_r8
+bp%saw_rho_out = 0.0_r8
+bp%saw_n_dips = 0
+end subroutine saw_scalars_reset
 !------------------------------------------------------------------------------
 !> Set (`set`) or point at (`get`) the @ref boot_profs array called `name` (see @ref boot_prof_names);
 !! `get` is NULL if that array is unallocated or the name is unknown
@@ -393,6 +397,11 @@ DO k=1,SIZE(boot_prof_names)
   group_made = .TRUE.
   CALL hdf5_write(vals,filename,path//'/'//h5_name(boot_prof_names(k)))
 END DO
+IF(group_made)THEN
+  CALL hdf5_write(bp%saw_rho_m,filename,path//'/SAW_RHO_M')
+  CALL hdf5_write(bp%saw_rho_out,filename,path//'/SAW_RHO_OUT')
+  CALL hdf5_write(bp%saw_n_dips,filename,path//'/SAW_N_DIPS')
+END IF
 end subroutine boot_profs_save
 !------------------------------------------------------------------------------
 !> Read the @ref boot_profs arrays present in group `path`; the others are left unallocated
@@ -415,6 +424,11 @@ DO k=1,SIZE(boot_prof_names)
   IF(success)CALL boot_prof_access(bp,boot_prof_names(k),set=vals)
   DEALLOCATE(vals,dim_sizes)
 END DO
+IF(hdf5_field_exist(filename,path//'/SAW_N_DIPS'))THEN
+  CALL hdf5_read(bp%saw_rho_m,filename,path//'/SAW_RHO_M',success=success)
+  CALL hdf5_read(bp%saw_rho_out,filename,path//'/SAW_RHO_OUT',success=success)
+  CALL hdf5_read(bp%saw_n_dips,filename,path//'/SAW_N_DIPS',success=success)
+END IF
 end subroutine boot_profs_load
 !------------------------------------------------------------------------------
 !> HDF5 dataset name of a @ref boot_profs array (its name in upper case)
@@ -428,7 +442,7 @@ end function h5_name
 !---------------------------------------------------------------------------------
 !> Update F*F' profile from the inductive jphi coupled with the bootstrap current.
 !!
-!! Each call (one NL iteration; the first iteration of a solve runs @ref jphi_update and resets the
+!! Called once per NL iteration (the first iteration of a solve runs @ref jphi_update and resets the
 !! convergence state). Current densities are TokaMaker jphi in mu0*A/m² on the nodes `psi_n`
 !! (LCFS and the profile nodes `xpsi`):
 !!   1. Pressure scale.
@@ -518,30 +532,35 @@ IF(bs_frozen) THEN
   jphi_pd = self%jphi_pd_last
   djbs = 0.0_r8
 ELSE
-  IF (self%boot_ops%isolate_edge_jbs) THEN
+  CALL calculate_bootstrap(self, gseq, self%npsi, xpsi, jphi_bs, jphi_pd, ravgs=ravgs(1:,:))
+  !--- A surface that failed both the cut-cell and the tracer evaluation ends the solve (gs_solve error -10)
+  IF(.NOT.ALL(ravgs(1:,2)>0.0_r8))THEN
+    CALL oft_warn('jphi_bs_update: flux-surface evaluation failed on a bootstrap node')
+    gseq%prof_failed=.TRUE.
+    RETURN
+  END IF
+  IF(self%boot_ops%isolate_edge_jbs)THEN
     ALLOCATE(jphi_bs_spike(0:self%npsi))
-    CALL calculate_bootstrap(self, gseq, self%npsi, xpsi, jphi_bs, jphi_pd, &
-        isolate_edge_jbs=self%boot_ops%isolate_edge_jbs, &
-        scale_jbs=self%boot_ops%scale_jbs, &
-        jphi_bs_spike=jphi_bs_spike, ravgs=ravgs(1:,:))
-    IF (self%boot_ops%diagnose_bs) THEN
+    CALL edge_spike(self%npsi, xpsi, jphi_bs, jphi_bs_spike)
+  END IF
+  IF(self%boot_ops%diagnose_bs)THEN
+    IF(self%boot_ops%isolate_edge_jbs)THEN
       WRITE(*,'(A)') '  [diagnose_bs] i  psi_N         jphi_bs(bulk)[A/m2]  spike[A/m2]   jphi[A/m2]  jphi_fixed[A/m2]'
       DO i = 1, self%npsi
         WRITE(*,'(A,I4,5ES15.5)') '  ', i, xpsi(i), jphi_bs(i), jphi_bs_spike(i), self%jphi(i), jphi_fixed(i)/mu0
       END DO
-    END IF
-    jphi_bs = jphi_bs_spike
-    DEALLOCATE(jphi_bs_spike)
-  ELSE
-    CALL calculate_bootstrap(self, gseq, self%npsi, xpsi, jphi_bs, jphi_pd, ravgs=ravgs(1:,:))
-    jphi_bs = jphi_bs * self%boot_ops%scale_jbs
-    IF(self%boot_ops%diagnose_bs)THEN
+    ELSE
       WRITE(*,'(A)') '  [diagnose_bs] i  psi_N         jphi_bs[A/m2]      jphi[A/m2]  jphi_fixed[A/m2]'
       DO i = 1, self%npsi
         WRITE(*,'(A,I4,4ES15.5)') '  ', i, xpsi(i), jphi_bs(i), self%jphi(i), jphi_fixed(i)/mu0
       END DO
     END IF
   END IF
+  IF(self%boot_ops%isolate_edge_jbs)THEN
+    jphi_bs = jphi_bs_spike
+    DEALLOCATE(jphi_bs_spike)
+  END IF
+  jphi_bs = jphi_bs * self%boot_ops%scale_jbs
   jphi_pd = jphi_pd * self%boot_ops%scale_jbs
   jphi_bs = jphi_bs * mu0
   jphi_pd = jphi_pd * mu0
@@ -549,7 +568,7 @@ ELSE
   IF(ALLOCATED(self%jphi_bs_last)) THEN
     djbs = SQRT(SUM((jphi_bs - self%jphi_bs_last)**2) / REAL(self%npsi+1,r8)) / &
            MAX(SQRT(SUM(jphi_bs**2) / REAL(self%npsi+1,r8)), 1.0e-30_r8)
-    CALL stall_check(djbs, self%boot_ops%djbs_tol, self%djbs_stol, self%djbs_min, self%djbs_no_improve, &
+    CALL stall_check(djbs, self%boot_ops%djbs_tol, djbs_stol, self%djbs_min, self%djbs_no_improve, &
                      self%freeze_jbs, 'Bootstrap solution', 'djbs_tol', 'bootstrap solution')
   ELSE
     djbs = HUGE(1.0_r8)
@@ -608,23 +627,19 @@ END IF
 ip_ind = ip_result_hi - ip_result_lo
 IF(ABS(ip_ind) > 0.0_r8)THEN
   alpha = (ip_target - ip_result_lo) / ip_ind
-  IF(alpha < -1.0_r8 .OR. alpha > 10.0_r8) THEN
-    WRITE(char_buf,'(A,ES12.4)') '[jphi_bs_update] WARNING: alpha out of expected range [-1,10]: alpha=', alpha
-    CALL oft_warn(TRIM(char_buf))
-  END IF
 ELSE
   alpha = self%alpha_last
 END IF
 !--- Relative change: alpha's scale is set by the units of ffp_prof (e.g. ~1e-6 for a jphi in A/m^2)
 dalpha = ABS(alpha - self%alpha_last) / MAX(ABS(alpha), TINY(1.0_r8))
 !--- Stall diagnostic only (alpha is never frozen): 2 consecutive non-decreasing steps.
-IF(dalpha >= self%dalpha_warn_tol .AND. dalpha >= self%dalpha_last) THEN
+IF(dalpha >= dalpha_warn_tol .AND. dalpha >= self%dalpha_last) THEN
   self%dalpha_no_improve = self%dalpha_no_improve + 1
   IF(self%dalpha_no_improve >= 2) THEN
     WRITE(char_buf,'(A,ES12.4,A,ES12.4,A)') &
       'Alpha convergence stalled,' // &
       ' relative change per nonlinear step = ', dalpha, &
-      ', above recommended tolerance (dalpha_warn_tol=', self%dalpha_warn_tol, ')'
+      ', above recommended tolerance (dalpha_warn_tol=', dalpha_warn_tol, ')'
     self%dalpha_no_improve = 0
     IF(oft_env%pm)CALL oft_warn(TRIM(char_buf))
   END IF
@@ -648,7 +663,7 @@ IF(do_saw)THEN
   djsaw = SQRT(SUM((jphi_saw - self%jphi_saw_last)**2)) / MAX(SQRT(SUM(jphi_total**2)), 1.0e-30_r8)
   ! Freeze only once jphi_bs has: before that the base current still moves, and an early iterate
   ! without a dip (djsaw = 0) would freeze the reset off for the whole solve
-  IF(self%freeze_jbs)CALL stall_check(djsaw, self%boot_ops%saw_tol, self%djbs_stol, self%djsaw_min, &
+  IF(self%freeze_jbs)CALL stall_check(djsaw, self%boot_ops%saw_tol, djbs_stol, self%djsaw_min, &
     self%djsaw_no_improve, self%freeze_saw, 'Sawtooth current', 'saw_tol', 'sawtooth current')
   DEALLOCATE(djphi_saw, cflds, cum)
 ELSE
@@ -719,7 +734,7 @@ END SUBROUTINE node_vals
 SUBROUTINE taper(a)
 REAL(r8), INTENT(inout) :: a(0:)
 IF(self%boot_ops%taper_edge_jbs)CALL apply_edge_taper(self%npsi+1, psi_n, a, &
-  1.0_r8 - self%boot_ops%taper_edge_psi0, self%boot_ops%taper_edge_shape, oft_psi_conv=.TRUE.)
+  1.0_r8 - self%boot_ops%taper_edge_psi0, self%boot_ops%taper_edge_shape)
 END SUBROUTINE taper
 END SUBROUTINE jphi_bs_update
 !---------------------------------------------------------------------------------
@@ -761,14 +776,8 @@ END SUBROUTINE stall_check
 !---------------------------------------------------------------------------------
 !> Sawtooth reset current on the nodes `xn` (OFT convention, mu0*A/m², TokaMaker jphi).
 !!
-!! q_base = q_eq*I_eq/I_base is the q that the base current implies in the equilibrium geometry
-!! (q*I is geometric), with q_eq = |F| q/F on the nodes (q/F by cut-cell, @ref gs_qgeom_cutcell).
-!! rho = sqrt(Phi_N), Phi from int q_eq dpsi. @ref saw_reset_1d gives the
-!! reset on the nodes whose cumulative-area bin holds at least a quarter of the mean bin area (a
-!! node-dense axis, e.g. psi_N ~ rho^2, leaves inner bins without quadrature points), interpolated
-!! in rho; inside the reset the base jphi between kept nodes is replaced by its interpolant too (weighted
-!! by the reset weight wr), so its fine structure is reset with the rest. dI/dA is mapped back to jphi with the linear part of
-!! eval_jtor_imas.
+!! q_base = q_eq*I_eq/I_base (q*I is geometric) on rho = sqrt(Phi_N); @ref saw_reset_1d resets it on
+!! nodes with enough enclosed area, interpolated in rho; dI/dA maps back to jphi via eval_jtor_imas.
 !---------------------------------------------------------------------------------
 SUBROUTINE saw_redistribute(self, gseq, xn, ravgs, I_base, I_eq, area, j_base, dj)
 CLASS(jphi_bs_flux_func), INTENT(inout) :: self
@@ -795,7 +804,7 @@ DO i = 1, n
   q_eq(i) = 0.0_r8
   IF(g(k) /= 0.0_r8)THEN
     psi = gseq%plasma_bounds(1) + xn(k)*(gseq%plasma_bounds(2) - gseq%plasma_bounds(1))
-    q_eq(i) = ABS(g(k))*SQRT(MAX(gseq%ffp_scale*gseq%I%f(psi) + gseq%I%f_offset**2, 0.0_r8))
+    q_eq(i) = ABS(g(k)*gs_fpol(gseq, psi))
   END IF
   c1(i) = ravgs(k,3)/ravgs(k,2)**2
   Ib(i) = I_base(k)
@@ -828,6 +837,7 @@ END DO
 IF(.NOT.(phi(n) > 0.0_r8))THEN
   CALL oft_warn('saw_redistribute: no closed surfaces for the q profile, skipping the reset this update')
   dj = 0.0_r8
+  CALL saw_scalars_reset(self%boot_profs)
   RETURN
 END IF
 rho = SQRT(phi/phi(n))
@@ -889,21 +899,11 @@ END SUBROUTINE saw_redistribute
 !---------------------------------------------------------------------------------
 !> Sawtooth q reset on a 1-D profile (axis first).
 !!
-!! rule 1 (fuse, after FUSE's saw_crash!): from the axis to rho_m, the first crossing of q = q_s + dq
-!! beyond the outermost q < q_s point (interpolated, so it moves continuously), q_t = q_s +
-!! dq*p(rho/rho_m), p C1 onto q at rho_m (cubic, or x^m for slope m > 3), weighted by
-!! w = clamp((q_s - min q)/ramp, 0, 1) (1 for ramp <= 0).
-!! rule 2 (local): each maximal q < q_s + dq interval [rho_in, rho_out] (interpolated crossings,
-!! rho_in = 0 at the axis) that holds a q < q_s point and has an outer crossing is reset about its
-!! q minimum rho_c (parabola-refined, 0 at the axis node): q_s + dq*p((rho-rho_c)/(rho_out-rho_c))
-!! outside rho_c, mirrored inside as q_s + D*p((rho_c-rho)/(rho_c-rho_in)), D = q(rho_in) - q_s
-!! (max(q(0) - q_s, 0) at the axis; flat if 0), weighted per interval by w_k. Humps inside an interval
-!! (between runs, or a run and an end) blend it toward per-run resets split at the hump tops by the hump
-!! height (local_reset), so an interval splitting in two moves q_new continuously.
-!! q is unchanged elsewhere, so dI vanishes at both ends of every interval.
-!! dI = I*(q/q_new - 1), dj = (d dI/dA)/c1. Both rules: rho_s / rho_m = q_s / q_s + dq crossings
-!! beyond the outermost q < q_s point; rho_out = outer end of the (outermost) reset; wr = per-node
-!! weight (w_k inside interval k, else 0); w = max weight; n_dips = regions reset (rule 1: q < q_s regions).
+!! rule 1 (FUSE saw_crash!): q -> q_s + dq*p(rho/rho_m) from the axis to rho_m (the q = q_s + dq crossing
+!! beyond the outermost q < q_s point), p C1 onto q at rho_m, weighted by w = clamp((q_s - min q)/ramp, 0, 1).
+!! rule 2 (local): each q < q_s + dq interval holding a q < q_s point is reset about its q minimum,
+!! weighted per interval (@ref local_reset); q is unchanged elsewhere, so dI = 0 at interval ends.
+!! dI = I*(q/q_new - 1), dj = (d dI/dA)/c1.
 !---------------------------------------------------------------------------------
 SUBROUTINE saw_reset_1d(n, rho, q, I, A, c1, q_s, dq, ramp, rule, q_new, dj, wr, rho_s, rho_m, rho_out, n_dips, w)
 INTEGER(i4), INTENT(in) :: n
@@ -938,7 +938,7 @@ DO k = 1, n
   reg_end(n_low) = k
 END DO
 IF(n_low == 0)RETURN
-CALL grad_nonuniform(n, rho, q, gq)
+CALL gradient_(n, rho, q, gq, edge_order=1)
 qm = q_s + dq
 !---Sawtooth radius (both rules) and rule 1's reset, from the outermost q < q_s region
 CALL full_reset(n_low, qt, rho_s, rho_m, ok)
@@ -946,8 +946,8 @@ IF(.NOT.ok)THEN
   rho_s = 0.0_r8; rho_m = 0.0_r8
 END IF
 IF(rule == 1)THEN
-  n_dips = n_low
   IF(ok)THEN
+    n_dips = n_low
     !---Trigger weight from the deepest point inside rho_m
     w = 1.0_r8
     IF(ramp > 0.0_r8)w = MIN(MAX((q_s - MINVAL(q, MASK=(rho < rho_m)))/ramp, 0.0_r8), 1.0_r8)
@@ -968,7 +968,7 @@ ELSE
   END DO
 END IF
 dI = I*(q/q_new - 1.0_r8)
-CALL grad_nonuniform(n, A, dI, dj)
+CALL gradient_(n, A, dI, dj, edge_order=1)
 dj = dj/c1
 DEALLOCATE(reg_start, reg_end, gq, dI, qt)
 CONTAINS
@@ -978,12 +978,11 @@ INTEGER(i4), INTENT(in) :: kr
 REAL(r8), INTENT(out) :: qt_(n), rs_, rm_
 LOGICAL, INTENT(out) :: ok_
 INTEGER(i4) :: is, jm, kk
-REAL(r8) :: qm, slope, m, x, p
+REAL(r8) :: slope, m
 qt_ = q; rs_ = 0.0_r8; rm_ = 0.0_r8; ok_ = .FALSE.
 is = reg_end(kr)
 IF(is >= n)RETURN
 rs_ = rho(is) + (q_s - q(is))/(q(is+1) - q(is))*(rho(is+1) - rho(is))
-qm = q_s + dq
 jm = 0
 DO kk = is + 1, n
   IF(q(kk) >= qm)THEN
@@ -997,13 +996,7 @@ rm_ = rho(jm-1) + (qm - q(jm-1))/(q(jm) - q(jm-1))*(rho(jm) - rho(jm-1))
 slope = gq(jm-1) + (rm_ - rho(jm-1))/(rho(jm) - rho(jm-1))*(gq(jm) - gq(jm-1))
 m = MAX(rm_*slope/dq, 0.0_r8)
 DO kk = 1, jm - 1
-  x = rho(kk)/rm_
-  IF(m <= 3.0_r8)THEN
-    p = (3.0_r8 - 2.0_r8*x)*x**2 + m*(x**3 - x**2)
-  ELSE
-    p = x**m
-  END IF
-  qt_(kk) = q_s + dq*p
+  qt_(kk) = q_s + dq*pshape(rho(kk)/rm_, m)
 END DO
 ok_ = .TRUE.
 END SUBROUTINE full_reset
@@ -1184,20 +1177,6 @@ ELSE
   pshape = x**m
 END IF
 END FUNCTION pshape
-!---Derivative dy/dx on a non-uniform grid (2nd-order interior, one-sided ends)
-SUBROUTINE grad_nonuniform(nn, xx, yy, dy)
-INTEGER(i4), INTENT(in) :: nn
-REAL(r8), INTENT(in) :: xx(nn), yy(nn)
-REAL(r8), INTENT(out) :: dy(nn)
-INTEGER(i4) :: kk
-REAL(r8) :: h1, h2
-dy(1) = (yy(2) - yy(1))/(xx(2) - xx(1))
-dy(nn) = (yy(nn) - yy(nn-1))/(xx(nn) - xx(nn-1))
-DO kk = 2, nn - 1
-  h1 = xx(kk) - xx(kk-1); h2 = xx(kk+1) - xx(kk)
-  dy(kk) = (h1**2*yy(kk+1) - h2**2*yy(kk-1) + (h2**2 - h1**2)*yy(kk))/(h1*h2*(h1 + h2))
-END DO
-END SUBROUTINE grad_nonuniform
 END SUBROUTINE saw_reset_1d
 !------------------------------------------------------------------------------
 !> Evaluate terms in augmented tracing ODE for computing Sauter factors
@@ -1266,7 +1245,7 @@ real(8), intent(out) :: fc(nr) !< Circulating particle fraction \f$ f_c \f$
 real(8), intent(out) :: r_avgs(nr,3) !< Flux surface averaged radial coords \f$<R>\f$, \f$<1/R>\f$, \f$<a>\f$
 real(8), intent(out) :: modb_avgs(nr,2) !< Flux surface averaged field \f$<|B|>\f$, \f$<|B|^2>\f$
 real(8), optional, intent(out) :: qprof(nr) !< Safety factor q on each surface (avoids a separate gs_get_qprof call)
-real(8), optional, intent(out) :: eps(nr) !< Local inverse aspect ratio \f$ \varepsilon = (R_{\max}-R_{\min})/(R_{\max}+R_{\min}) \f$ on each surface
+real(8), optional, intent(out) :: eps(nr) !< Inverse aspect ratio (R_max-R_min)/(R_max+R_min) on each surface
 real(8), optional, intent(out) :: invr2(nr) !< \f$<1/R^2>\f$ on each surface
 real(8) :: psi_surf,rmax,x1,x2,raxis,zaxis,h,h2,hf,ftu,ftl
 real(8) :: pt(3),pt_last(3),f(3),psi_tmp(1),gop(3,3)
@@ -1317,11 +1296,7 @@ ALLOCATE(pts(2,nr),fpol(nr),qtmp(nr),epstmp(nr),i2tmp(nr),done(nr))
 r_avgs=0.d0; modb_avgs=0.d0; fc=0.d0; qtmp=0.d0; epstmp=0.d0; i2tmp=0.d0
 DO j=1,nr
   psi_surf=psi_q(j)*(x2-x1) + x1
-  IF(gseq%mode==0)THEN
-    fpol(j)=gseq%ffp_scale*gseq%I%f(psi_surf)+gseq%I%f_offset
-  ELSE
-    fpol(j)=SIGN(1.d0,gseq%I%f_offset)*SQRT(gseq%ffp_scale*gseq%I%f(psi_surf) + gseq%I%f_offset**2)
-  END IF
+  fpol(j)=gs_fpol(gseq,psi_surf)
 END DO
 !--- Axis guard: flux surface degenerates at psi_N=1; prescribe analytically.
 done=(psi_q == 1.d0)
@@ -1462,52 +1437,29 @@ hf=hf/wsum
 end function sauter_hf
 !------------------------------------------------------------------------------
 !> Apply a smooth edge taper to an array, zeroing it at the plasma edge.
-!>
-!> @param n          Number of grid points
-!> @param psi        Normalised psi grid
-!> @param arr        Array to taper (modified in-place)
-!> @param psi0       psi value (in the grid's own convention) where taper begins
-!> @param shape      Taper shape: 1=cos² (Hann), 2=quintic smoothstep, 3=cubic power
-!> @param oft_psi_conv  If .TRUE., psi uses OFT internal convention (0=LCFS, 1=axis)
-!>                      and psi0 should be the OFT threshold (= 1 - standard psi0).
-!>                      Taper then acts on points where psi <= psi0.
-!>                      If .FALSE. (default), standard convention (0=axis, 1=LCFS),
-!>                      taper acts on points where psi >= psi0.
+!!
+!! @param n          Number of grid points
+!! @param psi        Normalised psi grid, OFT convention (0=LCFS, 1=axis)
+!! @param arr        Array to taper (modified in-place)
+!! @param psi0       psi (OFT convention) where the taper begins; it acts on psi <= psi0
+!! @param shape      Taper shape: 1=cos² (Hann), 2=quintic smoothstep, 3=cubic power
 !------------------------------------------------------------------------------
-SUBROUTINE apply_edge_taper(n, psi, arr, psi0, shape, oft_psi_conv)
+SUBROUTINE apply_edge_taper(n, psi, arr, psi0, shape)
 INTEGER(i4), INTENT(in)    :: n
 REAL(r8),    INTENT(in)    :: psi(n)
 REAL(r8),    INTENT(inout) :: arr(n)
 REAL(r8),    INTENT(in)    :: psi0
 INTEGER(i4), INTENT(in)    :: shape
-LOGICAL,     OPTIONAL, INTENT(in) :: oft_psi_conv
 !---
 INTEGER(i4) :: i
-LOGICAL     :: do_oft
 REAL(r8)    :: t_taper, w_taper, span
 CHARACTER(len=80) :: char_buf
 REAL(r8), PARAMETER :: HALF_PI = 1.5707963267948966_r8
-do_oft = .FALSE.
-IF (PRESENT(oft_psi_conv)) do_oft = oft_psi_conv
-! Taper width: distance from threshold to the plasma edge.
-! OFT convention: edge at psi=0, so width = psi0.
-! Standard convention: edge at psi=1, so width = 1 - psi0.
-IF (do_oft) THEN
-  span = psi0
-ELSE
-  span = 1.0_r8 - psi0
-END IF
+span = psi0 ! Taper width: the edge is at psi=0
 IF (span < 1.0e-6_r8) RETURN
 DO i = 1, n
-  IF (do_oft) THEN
-    ! OFT convention: edge at psi=0, taper region is psi in [0, psi0]
-    IF (psi(i) > psi0) CYCLE
-    t_taper = (psi0 - psi(i)) / span
-  ELSE
-    ! Standard convention: edge at psi=1, taper region is psi in [psi0, 1]
-    IF (psi(i) < psi0) CYCLE
-    t_taper = (psi(i) - psi0) / span
-  END IF
+  IF (psi(i) > psi0) CYCLE
+  t_taper = (psi0 - psi(i)) / span
   t_taper = MIN(MAX(t_taper, 0.0_r8), 1.0_r8)
   SELECT CASE (shape)
     CASE (1)  ! cos² / Hann
@@ -1525,43 +1477,25 @@ DO i = 1, n
 END DO
 END SUBROUTINE apply_edge_taper
 !------------------------------------------------------------------------------
-!> Compute dy/dx with second-order-accurate finite differences on the native grid.
-!>
-!> Port of `numpy.gradient(y, x, edge_order=2)`: the interior uses the
-!> three-point central stencil for the local (possibly non-uniform) spacing,
-!> and both endpoints use the second-order one-sided stencil.  The first-order
-!> endpoint difference numpy uses by default is badly inaccurate at the
-!> magnetic axis and separatrix, where the error propagates straight into
-!> on-axis/edge jphi_bs.
-!>
-!> This replaces an earlier shape-preserving PCHIP derivative.  On the uniform
-!> grids this code uses, the PCHIP endpoint formula reduces algebraically to
-!> the second-order one-sided difference, while its monotonicity clipping
-!> flattens the pedestal and makes the interior measurably less accurate.
-!>
-!> The grid is validated rather than repaired: unlike the PCHIP routine it
-!> replaces, this does not sort x or average over duplicated abscissae.
-!> Duplicated or unsorted flux labels give an undefined derivative, so they
-!> abort here instead of being silently smoothed.
-!>
-!> @param n     Number of input points (>= 3)
-!> @param x     Independent variable (e.g. psi); strictly monotonic, either direction
-!> @param y     Dependent variable sampled on x
-!> @param dydx  Output: dy/dx at each point in x
+!> dy/dx on a strictly monotonic, possibly non-uniform grid, as `numpy.gradient(y, x, edge_order=...)`:
+!! three-point central interior, one-sided ends of order `edge_order` (1 or 2, default 2). Aborts on
+!! a non-finite input or result, or on a repeated or unsorted abscissa.
 !------------------------------------------------------------------------------
-SUBROUTINE gradient_(n, x, y, dydx)
+SUBROUTINE gradient_(n, x, y, dydx, edge_order)
 USE, INTRINSIC :: IEEE_ARITHMETIC, ONLY: IEEE_IS_FINITE
-INTEGER(i4), INTENT(in) :: n
-REAL(r8), INTENT(in) :: x(n)
-REAL(r8), INTENT(in) :: y(n)
-REAL(r8), INTENT(out) :: dydx(n)
+INTEGER(i4), INTENT(in) :: n !< Number of points
+REAL(r8), INTENT(in) :: x(n) !< Abscissae
+REAL(r8), INTENT(in) :: y(n) !< Values on x
+REAL(r8), INTENT(out) :: dydx(n) !< dy/dx on x
+INTEGER(i4), OPTIONAL, INTENT(in) :: edge_order !< Order of the end stencils (1 or 2, default 2)
 !---
-INTEGER(i4) :: i
+INTEGER(i4) :: i, eo
 REAL(r8) :: hs, hd !< Backward and forward interval widths about the stencil centre
 CHARACTER(len=512) :: char_buf
-IF(n < 3) &
-  CALL oft_abort('fewer than 3 input points; a second-order stencil is undefined', &
-    'gradient_', __FILE__)
+eo = 2
+IF(PRESENT(edge_order))eo = edge_order
+IF(n < eo+1) &
+  CALL oft_abort('too few input points for the end stencils', 'gradient_', __FILE__)
 DO i = 1, n
   IF(.NOT.IEEE_IS_FINITE(x(i)) .OR. .NOT.IEEE_IS_FINITE(y(i)))THEN
     WRITE(char_buf,'(A,I0,A,ES12.5,A,ES12.5)') 'non-finite input at i=', i, &
@@ -1587,17 +1521,22 @@ DO i = 2, n-1
             + ((hd - hs)/(hs*hd))*y(i) &
             + (hs/(hd*(hs + hd)))*y(i+1)
 END DO
-!--- Endpoints: second-order one-sided stencils (numpy's edge_order=2)
-hs = x(2) - x(1)
-hd = x(3) - x(2)
-dydx(1) = -((2.0_r8*hs + hd)/(hs*(hs + hd)))*y(1) &
-          + ((hs + hd)/(hs*hd))*y(2) &
-          - (hs/(hd*(hs + hd)))*y(3)
-hs = x(n-1) - x(n-2)
-hd = x(n) - x(n-1)
-dydx(n) = (hd/(hs*(hs + hd)))*y(n-2) &
-          - ((hd + hs)/(hs*hd))*y(n-1) &
-          + ((2.0_r8*hd + hs)/(hd*(hs + hd)))*y(n)
+!--- Endpoints: one-sided stencils of order eo
+IF(eo == 1)THEN
+  dydx(1) = (y(2) - y(1))/(x(2) - x(1))
+  dydx(n) = (y(n) - y(n-1))/(x(n) - x(n-1))
+ELSE
+  hs = x(2) - x(1)
+  hd = x(3) - x(2)
+  dydx(1) = -((2.0_r8*hs + hd)/(hs*(hs + hd)))*y(1) &
+            + ((hs + hd)/(hs*hd))*y(2) &
+            - (hs/(hd*(hs + hd)))*y(3)
+  hs = x(n-1) - x(n-2)
+  hd = x(n) - x(n-1)
+  dydx(n) = (hd/(hs*(hs + hd)))*y(n-2) &
+            - ((hd + hs)/(hs*hd))*y(n-1) &
+            + ((2.0_r8*hd + hs)/(hd*(hs + hd)))*y(n)
+END IF
 !--- Finite input does not guarantee a finite result: the stencil weights
 !   overflow for large y on a very fine grid.
 DO i = 1, n
@@ -1609,31 +1548,23 @@ DO i = 1, n
 END DO
 END SUBROUTINE gradient_
 !------------------------------------------------------------------------------
-!> Computes the bootstrap current on a uniform psi_N grid.
-!>
-!> Translated from Python bootstrap.py: calculate_profiles_and_bootstrap
-!> (up to and including the redl_bootstrap call).
-!>
-!> Fixed conventions: NRL Coulomb logs, Koh ion collisionality model,
-!> Redl 2021 jboot1 form with use_sign_q=.TRUE., L34=L31.
-!>
-!> @param gseq    Equilibrium object (must have Te, Ti, ne, ni, Zeff set)
-!> @param n_psi    Number of flux surface samples
-!> @param psi_N    Normalised psi grid [0,1], arbitrary spacing
-!> @param jphi_bs Output: bootstrap current density as TokaMaker jphi = <j_phi> [A/m^2] on psi_N grid
-!> @param jphi_pd Output: its pressure-driven part [A/m^2]
+!> Bootstrap current (Redl 2021) on the nodes psi_N (bootstrap.py calculate_profiles_and_bootstrap)
+!!
+!! NRL Coulomb logs, Koh ion collisionality, Redl jboot1 (no sign(q) factor: <j.B> is odd in F), L34=L31.
+!!
+!! @param gseq    Equilibrium object (must have Te, Ti, ne, ni, Zeff set)
+!! @param n_psi   Number of flux surface samples
+!! @param psi_N   Normalised psi, OFT convention (0=LCFS, 1=axis), any spacing, psi_N(1)>0
+!! @param jphi_bs Output: bootstrap current density as TokaMaker jphi = <j_phi> [A/m^2] on psi_N grid
+!! @param jphi_pd Output: its pressure-driven part [A/m^2]
 !------------------------------------------------------------------------------
-SUBROUTINE calculate_bootstrap(self, gseq, n_psi, psi_N, jphi_bs, jphi_pd, &
-                               isolate_edge_jbs, scale_jbs, jphi_bs_spike, ravgs)
+SUBROUTINE calculate_bootstrap(self, gseq, n_psi, psi_N, jphi_bs, jphi_pd, ravgs)
 CLASS(jphi_bs_flux_func), INTENT(inout) :: self
 CLASS(gs_equil), INTENT(inout) :: gseq
 INTEGER(i4), INTENT(in) :: n_psi
-REAL(r8), INTENT(in) :: psi_N(1:n_psi)  !< Normalised psi grid (0,1], arbitrary spacing. psi_N(1)>0.0
+REAL(r8), INTENT(in) :: psi_N(1:n_psi)  !< Normalised psi (OFT convention, 0=LCFS), psi_N(1)>0
 REAL(r8), INTENT(out) :: jphi_bs(0:n_psi) !< jphi_bs(0) the LCFS value (extrapolated)
 REAL(r8), INTENT(out) :: jphi_pd(0:n_psi) !< Pressure-driven part of jphi_bs
-LOGICAL,  OPTIONAL, INTENT(in)  :: isolate_edge_jbs  !< If .TRUE., isolate edge spike from core
-REAL(r8), OPTIONAL, INTENT(in)  :: scale_jbs         !< Scaling factor applied to spike profile (default 1)
-REAL(r8), OPTIONAL, INTENT(out) :: jphi_bs_spike(0:n_psi)        !< Processed spike profile [A/m^2]
 REAL(r8), OPTIONAL, INTENT(out) :: ravgs(n_psi,3) !< <R>, <1/R>, <1/R^2> on psi_N from the Sauter pass
 !---
 INTEGER(i4) :: i
@@ -1659,11 +1590,6 @@ REAL(r8) :: jdotB_bs(n_psi)
 REAL(r8) :: jdotB(0:n_psi) !< <j_BS.B> with its LCFS/axis values
 REAL(r8) :: psi_range, Zdom, pscale, pprime
 REAL(r8), PARAMETER :: EC = 1.602176634e-19_r8
-! Locals for optional edge-spike isolation
-LOGICAL  :: do_isolate
-REAL(r8) :: scl_jbs
-! Workspace for psi_N convention flip (OFT: 0=LCFS,1=axis → standard: 0=axis,1=LCFS)
-REAL(r8), ALLOCATABLE :: psi_N_std(:), jphi_bs_std(:), mask_std(:)
 !---
 ! Compute raw psi values from the caller-supplied psi_N grid
 psi_range = gseq%plasma_bounds(2) - gseq%plasma_bounds(1)
@@ -1680,11 +1606,7 @@ IF(MAXVAL(Te) > 5.0e5_r8)CALL oft_warn('calculate_bootstrap: max(Te) > 500 keV �
 IF(MAXVAL(Ti) > 5.0e5_r8)CALL oft_warn('calculate_bootstrap: max(Ti) > 500 keV — profiles should be in keV, not eV')
 ! Get I(psi) = R*Bt = F(psi) profile on the psi_N grid
 DO i = 1, n_psi
-  IF(gseq%mode==0)THEN
-    f(i) = gseq%ffp_scale * gseq%I%f(psi_abs(i)) + gseq%I%f_offset
-  ELSE
-    f(i) = SIGN(1.0_r8, gseq%I%f_offset) * SQRT(gseq%ffp_scale * gseq%I%f(psi_abs(i)) + gseq%I%f_offset**2)
-  END IF
+  f(i) = gs_fpol(gseq, psi_abs(i))
 END DO
 ! Get flux-surface geometry: fc, eps, q, and <R> in one tracing pass
 CALL sauter_fc(gseq, n_psi, psi_N, fc, r_avgs_saut, modb_avgs_saut, qprof=qvals, eps=eps, invr2=invr2)
@@ -1728,9 +1650,9 @@ nu_i_star = 4.90e-18_r8 * ABS(qvals) * R_avg * ni &
 nu_e_star = 6.921e-18_r8 * ABS(qvals) * R_avg * ne &
           * Zeff * ln_le / (Te**2 * eps**1.5_r8)
 ! Compute bootstrap current via Redl 2021
-CALL redl_bootstrap(n_psi, Te, Ti, ne, ni, pe, pi_arr, Zeff, qvals, eps, ft, f, &
+CALL redl_bootstrap(n_psi, Te, Ti, ne, ni, pe, pi_arr, Zeff, eps, ft, f, &
     dT_e_dpsi, dT_i_dpsi, dn_e_dpsi, dn_i_dpsi, &
-    ln_le, ln_lii, nu_e_star, nu_i_star, jdotB_bs)
+    nu_e_star, nu_i_star, jdotB_bs)
 ! Convert <j_BS.B> to TokaMaker's jphi = <j_phi> = <R>P' + <1/R>FF'/mu0 (exact, see
 ! doc_tokamaker_current_conventions.md eq. A7): the field-aligned part F<1/R>/<B^2> * <j_BS.B>,
 ! plus the pressure-driven (diamagnetic + Pfirsch-Schlueter) part P'(<R> - F^2<1/R>/<B^2>),
@@ -1766,27 +1688,6 @@ IF(self%boot_ops%diagnose_bs)THEN
   WRITE(*,'(A,3ES12.4)') '    nu_e_star: ', nu_e_star(1), nu_e_star(n_psi/2), nu_e_star(n_psi)
   WRITE(*,'(A,3ES12.4)') '    jphi_bs  : ', jphi_bs(1), jphi_bs(n_psi/2), jphi_bs(n_psi)
 END IF
-!---
-! Optionally isolate the edge bootstrap spike and return it as jphi_bs_spike, mirroring the
-! isolate_edge_jbs logic in bootstrap.py:calculate_profiles_and_bootstrap.
-IF (PRESENT(jphi_bs_spike)) THEN
-  do_isolate = .FALSE.
-  scl_jbs    = 1.0_r8
-  IF (PRESENT(isolate_edge_jbs)) do_isolate = isolate_edge_jbs
-  IF (PRESENT(scale_jbs))        scl_jbs    = scale_jbs
-  IF (do_isolate) THEN
-    ! analyze_bootstrap_edge_spike uses standard psi_N convention (0=axis, 1=LCFS).
-    ! OFT internal convention is reversed (0=LCFS, 1=axis).
-    ! Flip arrays before calling, then flip outputs back.
-    ALLOCATE(psi_N_std(0:n_psi), jphi_bs_std(0:n_psi), mask_std(0:n_psi))
-    psi_N_std(0:n_psi-1) = 1.0_r8 - psi_N(n_psi:1:-1)
-    psi_N_std(n_psi) = 1.0_r8
-    jphi_bs_std  = jphi_bs(n_psi:0:-1)
-    CALL analyze_bootstrap_edge_spike((n_psi+1), psi_N_std, jphi_bs_std, mask_std)
-    jphi_bs_spike = scl_jbs * mask_std(n_psi:0:-1)
-    DEALLOCATE(psi_N_std, jphi_bs_std, mask_std)
-  END IF
-END IF
 CONTAINS
 !> Zero non-finite values (where F -> 0) and extrapolate to the LCFS/axis, where q is undefined
 SUBROUTINE finish(a)
@@ -1796,8 +1697,25 @@ CALL extrap_jbs_boundaries(n_psi, psi_N, a)
 END SUBROUTINE finish
 END SUBROUTINE calculate_bootstrap
 !------------------------------------------------------------------------------
+!> Edge spike of a bootstrap profile (OFT convention), as isolate_edge_jbs in
+!! bootstrap.py calculate_profiles_and_bootstrap
+!------------------------------------------------------------------------------
+SUBROUTINE edge_spike(n_psi, psi_N, jphi_bs, spike)
+INTEGER(i4), INTENT(in) :: n_psi !< Number of nodes (without the LCFS)
+REAL(r8), INTENT(in) :: psi_N(1:n_psi) !< Normalised psi (OFT convention, 0=LCFS)
+REAL(r8), INTENT(in) :: jphi_bs(0:n_psi) !< Bootstrap profile, jphi_bs(0) at the LCFS
+REAL(r8), INTENT(out) :: spike(0:n_psi) !< Edge spike
+REAL(r8) :: psi_N_std(0:n_psi), jphi_bs_std(0:n_psi), mask_std(0:n_psi)
+! analyze_bootstrap_edge_spike uses the standard convention (0=axis, 1=LCFS): flip in and out
+psi_N_std(0:n_psi-1) = 1.0_r8 - psi_N(n_psi:1:-1)
+psi_N_std(n_psi) = 1.0_r8
+jphi_bs_std = jphi_bs(n_psi:0:-1)
+CALL analyze_bootstrap_edge_spike(n_psi+1, psi_N_std, jphi_bs_std, mask_std)
+spike = mask_std(n_psi:0:-1)
+END SUBROUTINE edge_spike
+!------------------------------------------------------------------------------
 !> Linearly extrapolate a bootstrap profile to the LCFS (and the axis, if a node) where q is
-!> undefined, using the second-order gradient at the nearest well-defined point.
+!! undefined, using the second-order gradient at the nearest well-defined point.
 !------------------------------------------------------------------------------
 SUBROUTINE extrap_jbs_boundaries(n_psi, psi_N, prof)
 INTEGER(i4), INTENT(in) :: n_psi
@@ -1827,26 +1745,26 @@ ENDIF
 END SUBROUTINE extrap_jbs_boundaries
 !------------------------------------------------------------------------------
 !> Analyse and isolate the edge bootstrap-current spike from a toroidal
-!> bootstrap current density profile.
-!>
-!> Translated from Python bootstrap.py: analyze_bootstrap_edge_spike
-!>
-!> The routine performs the following steps:
-!>   1. Locates the highest local peak (whose prominence exceeds 5%)
-!>      in psi_N in [0.85,1.0], else the rightmost peak for psi_N > 0.7.  
-!>      With no edge region or no qualifying peak the un-isolated profile 
-!>      is returned (with a warning) rather than zeros.
-!>   2. Finds the minimum of jphi_bs between psi_N = 0.5 and the peak (the
-!>      flat-core stitching level, lmin_jbs).
-!>   3. Builds masked_spike: flat at lmin_jbs for psi_N below the minimum
-!>      index, actual jphi_bs from that index to the separatrix.
-!>   4. Smooths the flat/spike junction with a cubic Hermite spline over a
-!>      window of width min(0.5 * dist_to_peak, 0.2) centred on the minimum.
-!>
-!> @param n                  Number of flux surface samples
-!> @param psi_N              Normalised poloidal flux grid [0, 1]
-!> @param jphi_bs           Bootstrap current density j_phi profile [A/m^2]
-!> @param masked_spike       Output: isolated edge spike spliced onto flat core [A/m^2]
+!! bootstrap current density profile.
+!!
+!! Translated from Python bootstrap.py: analyze_bootstrap_edge_spike
+!!
+!! The routine performs the following steps:
+!!   1. Locates the highest local peak (whose prominence exceeds 5%)
+!!      in psi_N in [0.85,1.0], else the rightmost peak for psi_N > 0.7.
+!!      With no edge region or no qualifying peak the un-isolated profile
+!!      is returned (with a warning) rather than zeros.
+!!   2. Finds the minimum of jphi_bs between psi_N = 0.5 and the peak (the
+!!      flat-core stitching level, lmin_jbs).
+!!   3. Builds masked_spike: flat at lmin_jbs for psi_N below the minimum
+!!      index, actual jphi_bs from that index to the separatrix.
+!!   4. Smooths the flat/spike junction with a cubic Hermite spline over a
+!!      window of width min(0.5 * dist_to_peak, 0.2) centred on the minimum.
+!!
+!! @param n                  Number of flux surface samples
+!! @param psi_N              Normalised poloidal flux grid [0, 1]
+!! @param jphi_bs           Bootstrap current density j_phi profile [A/m^2]
+!! @param masked_spike       Output: isolated edge spike spliced onto flat core [A/m^2]
 !------------------------------------------------------------------------------
 SUBROUTINE analyze_bootstrap_edge_spike(n, psi_N, jphi_bs, masked_spike)
 INTEGER(i4), INTENT(in)  :: n
@@ -1866,7 +1784,7 @@ REAL(r8)    :: y_start, dy_start, y_end, dy_end
 REAL(r8)    :: dx_window, t, h00, h10, h01, h11, y_patch
 ! =====================================================================
 ! 1. Find the highest local peak (whose prominence exceeds 5%)
-!    in psi_N in [0.85,1.0], else the rightmost peak for psi_N > 0.7.  
+!    in psi_N in [0.85,1.0], else the rightmost peak for psi_N > 0.7.
 !    Fall back to the input jphi_bs if no edge region or no qualifying peak.
 ! =====================================================================
 has_edge   = .FALSE.
@@ -1938,7 +1856,7 @@ peak_psi    = psi_N(peak_idx)
 !    Mirrors: lmin_jbs = min(j_bootstrap[(psi_N > 0.5) & (psi_N < peak_psi)])
 ! =====================================================================
 lmin_jbs = 1.0e30_r8
-lmin_idx  = peak_idx      ! fallback: use peak location if no point found
+lmin_idx  = peak_idx
 DO i = 1, n
   IF (psi_N(i) > 0.5_r8 .AND. psi_N(i) < peak_psi) THEN
     IF (jphi_bs(i) < lmin_jbs) THEN
@@ -1947,6 +1865,12 @@ DO i = 1, n
     END IF
   END IF
 END DO
+IF (lmin_idx == peak_idx) THEN
+  CALL oft_warn('[analyze_bootstrap_edge_spike] no node between psi_N = 0.5 and the '// &
+    'edge peak; using bootstrap profile without edge isolation')
+  masked_spike = jphi_bs
+  RETURN
+END IF
 ! =====================================================================
 ! 3. Build masked_spike:
 !    - Flat at lmin_jbs for psi_N < psi_N(lmin_idx)
@@ -2021,47 +1945,43 @@ END IF
 END SUBROUTINE analyze_bootstrap_edge_spike
 !------------------------------------------------------------------------------
 !> Redl 2021 bootstrap current formula.
-!>
-!> Translates Python bootstrap.py:redl_bootstrap with fixed settings:
-!>   - use_legacy_L34 = .FALSE.  (L34 = L31)
-!>   - use_sign_q     = .TRUE.
-!>   - formula_form   = 'jboot1'
-!>   - nu_e_star and nu_i_star are passed in pre-computed (no internal fallback)
-!>
-!> Reference: Redl et al., Phys. Plasmas 28, 022502 (2021)
-!>
-!> @param n           Number of flux surfaces
-!> @param Te          Electron temperature [eV]
-!> @param Ti          Ion temperature [eV]
-!> @param ne          Electron density [m^-3]
-!> @param ni          Ion density [m^-3]
-!> @param pe          Electron pressure [Pa]
-!> @param pi          Ion pressure [Pa]
-!> @param Zeff        Effective charge
-!> @param q           Safety factor
-!> @param eps         Inverse aspect ratio
-!> @param fT          Trapped particle fraction
-!> @param I_psi       Toroidal current function F = R*Bt [T*m]
-!> @param dT_e_dpsi   d(Te)/d(psi) [eV/Wb]
-!> @param dT_i_dpsi   d(Ti)/d(psi) [eV/Wb]
-!> @param dn_e_dpsi   d(ne)/d(psi) [m^-3/Wb]
-!> @param dn_i_dpsi   d(ni)/d(psi) [m^-3/Wb]
-!> @param ln_lambda_e Electron Coulomb logarithm
-!> @param ln_lambda_ii Ion Coulomb logarithm
-!> @param nu_e_star   Electron collisionality (pre-computed)
-!> @param nu_i_star   Ion collisionality (pre-computed)
-!> @param avg_j_bootstrap_times_B Output: <j_{bs,parallel}*B> [same units as -I_psi * pe * d/dpsi]
+!!
+!! Translates Python bootstrap.py:redl_bootstrap with fixed settings:
+!!   - use_legacy_L34 = .FALSE.  (L34 = L31)
+!!   - no sign(q) factor (<j.B> is odd in F through I_psi)
+!!   - formula_form   = 'jboot1'
+!!   - nu_e_star and nu_i_star are passed in pre-computed (no internal fallback)
+!!
+!! Reference: Redl et al., Phys. Plasmas 28, 022502 (2021)
+!!
+!! @param n           Number of flux surfaces
+!! @param Te          Electron temperature [eV]
+!! @param Ti          Ion temperature [eV]
+!! @param ne          Electron density [m^-3]
+!! @param ni          Ion density [m^-3]
+!! @param pe          Electron pressure [Pa]
+!! @param pi          Ion pressure [Pa]
+!! @param Zeff        Effective charge
+!! @param eps         Inverse aspect ratio
+!! @param fT          Trapped particle fraction
+!! @param I_psi       Toroidal current function F = R*Bt [T*m]
+!! @param dT_e_dpsi   d(Te)/d(psi) [eV/Wb]
+!! @param dT_i_dpsi   d(Ti)/d(psi) [eV/Wb]
+!! @param dn_e_dpsi   d(ne)/d(psi) [m^-3/Wb]
+!! @param dn_i_dpsi   d(ni)/d(psi) [m^-3/Wb]
+!! @param nu_e_star   Electron collisionality (pre-computed)
+!! @param nu_i_star   Ion collisionality (pre-computed)
+!! @param avg_j_bootstrap_times_B Output: <j_{bs,parallel}*B> [same units as -I_psi * pe * d/dpsi]
 !------------------------------------------------------------------------------
-SUBROUTINE redl_bootstrap(n, Te, Ti, ne, ni, pe, pi, Zeff, q, eps, fT, I_psi, &
+SUBROUTINE redl_bootstrap(n, Te, Ti, ne, ni, pe, pi, Zeff, eps, fT, I_psi, &
     dT_e_dpsi, dT_i_dpsi, dn_e_dpsi, dn_i_dpsi, &
-    ln_lambda_e, ln_lambda_ii, nu_e_star, nu_i_star, avg_j_bootstrap_times_B)
+    nu_e_star, nu_i_star, avg_j_bootstrap_times_B)
 INTEGER(i4), INTENT(in) :: n
 REAL(r8), INTENT(in) :: Te(n), Ti(n), ne(n), ni(n)
 REAL(r8), INTENT(in) :: pe(n), pi(n), Zeff(n)
-REAL(r8), INTENT(in) :: q(n), eps(n), fT(n), I_psi(n)
+REAL(r8), INTENT(in) :: eps(n), fT(n), I_psi(n)
 REAL(r8), INTENT(in) :: dT_e_dpsi(n), dT_i_dpsi(n)
 REAL(r8), INTENT(in) :: dn_e_dpsi(n), dn_i_dpsi(n)
-REAL(r8), INTENT(in) :: ln_lambda_e(n), ln_lambda_ii(n)
 REAL(r8), INTENT(in) :: nu_e_star(n), nu_i_star(n)
 REAL(r8), INTENT(out) :: avg_j_bootstrap_times_B(n)
 !---
@@ -2100,7 +2020,7 @@ dee_3 = (0.13_r8 * (1.0_r8 - 0.38_r8*fT) * nu_e_star / (Zeff**2)) &
        + fT**2 * SQRT((0.075_r8 + 0.25_r8*(Zeff - 1.0_r8)**2) * nu_e_star))
 X32_ee = fT / (1.0_r8 + dee_2 + dee_3)
 F32_ee = ( (0.1_r8 + 0.6_r8*Zeff) &
-         / (Zeff*(0.77_r8 + 0.63_r8*(1.0_r8 + (Zeff - 1.0_r8)**1.1_r8))) &
+         / (Zeff*(0.77_r8 + 0.63_r8*(1.0_r8 + MAX(Zeff - 1.0_r8, 0.0_r8)**1.1_r8))) &
          * (X32_ee - X32_ee**4) &
          + 0.7_r8/(1.0_r8 + 0.2_r8*Zeff) &
          * (X32_ee**2 - X32_ee**4 - 1.2_r8*(X32_ee**3 - X32_ee**4)) &
@@ -2128,7 +2048,7 @@ alpha = ((alpha0 + 0.7_r8*Zeff*SQRT(fT)*SQRT(nu_i_star)) &
        - 0.002_r8*nu_i_star**2*fT**6) &
       / (1.0_r8 + 0.004_r8*nu_i_star**2*fT**6)
 ! =====================================================================
-! Assemble: jboot1 form with use_sign_q = .TRUE.
+! Assemble: jboot1 form
 ! =====================================================================
 dp_dpsi = (ne*dT_e_dpsi + Te*dn_e_dpsi &
          + ni*dT_i_dpsi + Ti*dn_i_dpsi) * EC
@@ -2136,7 +2056,5 @@ bra1 = L31 * dp_dpsi / pe
 bra2 = L32 * dT_e_dpsi / Te
 bra3 = L34 * alpha * (1.0_r8 - R_pe) / R_pe * dT_i_dpsi / Ti
 avg_j_bootstrap_times_B = -I_psi * pe * (bra1 + bra2 + bra3)
-! Apply sign(q)
-avg_j_bootstrap_times_B = avg_j_bootstrap_times_B * SIGN(1.0_r8, q)
 END SUBROUTINE redl_bootstrap
 end module grad_shaf_bootstrap
