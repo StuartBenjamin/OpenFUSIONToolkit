@@ -101,7 +101,7 @@ converged I_p sits within a few 1e-4 of the target. `jphi_update` normalises its
 `ind` (inductive), `fixed`, `total`. `_raw` is before edge isolation, scaling and taper; `_final` is what
 enters `jphi_total` = `jphi_ind_final` + `jphi_bs_final` + `jphi_fixed_final` (the Python solve returns the
 GS output as `jphi_total`). `jdotb_bs_raw` is the Redl ⟨J·B⟩ behind `jphi_bs_raw`. Options use `jbs`
-(`scale_jbs`, `isolate_edge_jbs`, `parameterize_jbs`, `taper_edge_jbs`, `djbs_tol`).
+(`scale_jbs`, `isolate_edge_jbs`, `taper_edge_jbs`, `djbs_tol`).
 
 ## Where these are used
 - TokaMaker `jphi_bs_update` / `calculate_bootstrap` (Fortran) and `solve_with_bootstrap(use_python_solve=True)`:
