@@ -47,8 +47,8 @@ USE tracing_2d, ONLY: active_tracer, tracinginv_fs, set_tracer, cylinv_interp
 IMPLICIT NONE
 #include "local.h"
 INTEGER(4), PARAMETER :: max_xpoints = 20
-INTEGER(4) :: torflux_qgeom_backend = 0 !< Toroidal flux map q/F backend: 0 cut-cell, 1 tracer (testing only)
 REAL(8) :: qprof_trace_tol = -1.d0 !< Tracer tolerance override for @ref gs_get_qprof, <0 for default (testing only)
+INTEGER(4) :: qprof_backend = 0 !< Surface backend of @ref gs_get_qprof, @ref gs_trace_surf, `gs_save_ifile` and `gs_save_eqdsk`: 0 cut-cell where supported, 1 field-line tracer (deprecated)
 !------------------------------------------------------------------------------
 !> Interpolation class for uniform source with simple tokamak representation
 !------------------------------------------------------------------------------
@@ -62,73 +62,28 @@ contains
   procedure :: interp => circle_interp
 end type circular_curr
 !------------------------------------------------------------------------------
-!> Map from normalized poloidal flux \f$ \hat{\psi} \f$ to normalized toroidal flux \f$ \hat{\Phi} \f$
-!!
-!! Stored and evaluated in the internal convention (\f$ 1-\hat{\psi} \f$, \f$ 1-\hat{\Phi} \f$: 0 at LCFS,
-!! 1 at axis). The map is a
-!! cubic Hermite interpolant through traced surfaces with slopes \f$ J = q/Q \f$.
-!------------------------------------------------------------------------------
-TYPE :: gs_torflux_map
-  LOGICAL :: active = .FALSE. !< Map required (any flux function with `coord/=0`)
-  INTEGER(i4) :: ns = 0 !< Number of surfaces (identity map if < 2)
-  INTEGER(i4) :: stamp = 0 !< Incremented on each map update
-  REAL(r8) :: Q = 1.d0 !< \f$ \int_0^1 q d\hat{\psi} \f$
-  REAL(r8), POINTER, DIMENSION(:) :: psis => NULL() !< \f$ 1-\hat{\psi} \f$ of each surface (ascending)
-  REAL(r8), POINTER, DIMENSION(:) :: phihat => NULL() !< \f$ 1-\hat{\Phi} \f$ of each surface
-  REAL(r8), POINTER, DIMENSION(:) :: jac => NULL() !< \f$ d\hat{\Phi}/d\hat{\psi} = q/Q \f$ of each surface
-  INTEGER(i4), POINTER, DIMENSION(:) :: bin => NULL() !< First interval of each uniform \f$ 1-\hat{\psi} \f$ bin (lookup index)
-CONTAINS
-  !> Evaluate \f$ 1-\hat{\Phi} \f$ and derivatives at \f$ 1-\hat{\psi} \f$
-  PROCEDURE :: eval => tmap_eval
-  !> Evaluate \f$ 1-\hat{\psi} \f$ at \f$ 1-\hat{\Phi} \f$
-  PROCEDURE :: inv => tmap_inv
-  !> Reset to identity map
-  PROCEDURE :: delete => tmap_delete
-END TYPE gs_torflux_map
-!------------------------------------------------------------------------------
 !> Abstract flux function prototype
-!!
-!! Subtypes implement `*_native` procedures in their storage coordinate; the
-!! non-overridable `f`, `fp`, `fpp` and `set_cofs` apply the \f$ \hat{\Phi}(\hat{\psi}) \f$
-!! transform selected by `coord`.
 !------------------------------------------------------------------------------
 TYPE, ABSTRACT :: flux_func
   INTEGER(i4) :: ndofs = 0 !< Number of free coefficients
-  INTEGER(i4) :: coord = 0 !< Storage coordinate (0: psi_n, 1: phi_n [dY/dPhi-hat], 2: phi_n_relabel [dY/dpsi-hat on Phi-hat grid])
   REAL(r8) :: f_offset = 0.d0 !< Offset value
   REAL(r8) :: plasma_bounds(2) = [-1.d99,1.d99] !< Current plasma bounds (for normalization)
   LOGICAL :: update_on_load = .TRUE. 
-  INTEGER(i4) :: fint_stamp = -1 !< Map stamp used to build `fint`
-  REAL(r8), POINTER, DIMENSION(:) :: fint => NULL() !< Cumulative \f$ \int fp d\hat{\psi} \f$ on map surfaces (`coord=2`)
-  REAL(r8), POINTER, DIMENSION(:,:) :: fcof => NULL() !< Per-interval quartic for partial integrals of `fint` [4,ns-1]
-  TYPE(gs_torflux_map), POINTER :: tmap => NULL() !< Toroidal flux map (owned by equilibrium)
 CONTAINS
   !> Delete profile
   PROCEDURE(flux_func_delete), DEFERRED :: delete
   !> Copy profile
   PROCEDURE(flux_func_copy), DEFERRED :: copy
   !> Evaluate function
-  PROCEDURE, NON_OVERRIDABLE :: f => flux_func_f
+  PROCEDURE(flux_func_eval), DEFERRED :: f
   !> Evaluate first derivative of function
-  PROCEDURE, NON_OVERRIDABLE :: fp => flux_func_fp
+  PROCEDURE(flux_func_eval), DEFERRED :: fp
   !> Evaluate second derivative of function
-  PROCEDURE, NON_OVERRIDABLE :: fpp => flux_func_fpp
-  !> Evaluate function in storage coordinate
-  PROCEDURE(flux_func_eval), DEFERRED :: f_native
-  !> Evaluate first derivative of function in storage coordinate
-  PROCEDURE(flux_func_eval), DEFERRED :: fp_native
-  !> Evaluate second derivative of function in storage coordinate
-  PROCEDURE :: fpp_native => dummy_fpp
-  !> Rebuild `fint` table for `coord=2`
-  PROCEDURE, NON_OVERRIDABLE :: build_fint => flux_func_build_fint
-  !> Get node locations in storage coordinate (surfaces traced exactly for toroidal map)
-  PROCEDURE :: get_nodes => flux_func_get_nodes
+  PROCEDURE :: fpp => dummy_fpp
   !> Update function to match new equilibrium solution
   PROCEDURE(flux_func_update), DEFERRED :: update
   !> Update function with new parameterization
-  PROCEDURE, NON_OVERRIDABLE :: set_cofs => flux_func_set_cofs
-  !> Update function with new parameterization (storage coordinate)
-  PROCEDURE(flux_cofs_set), DEFERRED :: set_cofs_native
+  PROCEDURE(flux_cofs_set), DEFERRED :: set_cofs
   !> Get current function parameterization
   PROCEDURE(flux_cofs_get), DEFERRED :: get_cofs
   !> Save flux function definition to file
@@ -363,7 +318,8 @@ TYPE :: gs_equil
   CLASS(flux_func), POINTER :: ni => NULL() !< Ion density flux function [m^-3]
   CLASS(flux_func), POINTER :: Zeff => NULL() !< Effective charge flux function (dimensionless)
   CLASS(flux_func), POINTER :: jphi_fixed => NULL() !< Fixed (non-rescaled) toroidal current density flux function [A/m^2]
-  TYPE(gs_torflux_map) :: tmap !< Poloidal to toroidal normalized flux map
+  CLASS(flux_func), POINTER :: torflux => NULL() !< Normalized toroidal flux map (if any profile is on \f$ \hat{\Phi} \f$)
+  INTEGER(i4) :: torflux_ierr = 0 !< Status of the last `torflux` update (0 ok, 1 failed and previous map kept, 2 no closed surfaces)
   CLASS(flux_func), POINTER :: jphi_saw => NULL() !< Input sawtooth toroidal current density flux function [A/m^2] (bootstrap profile only)
   TYPE(gs_factory), POINTER :: device => NULL() !< Device/factory object for equilibrium
 CONTAINS
@@ -557,75 +513,34 @@ abstract interface
     class(gs_equil), intent(inout) :: gseq
   end subroutine ani_press_update
 end interface
-!---Toroidal flux map and flux function transform (see grad_shaf_torflux.F90)
 INTERFACE
-  !> Get node locations in storage coordinate (none by default)
-  MODULE SUBROUTINE flux_func_get_nodes(self,nodes)
-    class(flux_func), intent(inout) :: self
-    real(r8), allocatable, intent(out) :: nodes(:) !< Node locations (internal normalized coordinate)
-  END SUBROUTINE flux_func_get_nodes
-  !> Evaluate \f$ 1-\hat{\Phi} \f$, \f$ J = d\hat{\Phi}/d\hat{\psi} \f$ and \f$ dJ/d\hat{\psi} \f$ at \f$ 1-\hat{\psi} \f$
-  MODULE SUBROUTINE tmap_eval(self,psihat,phihat,jac,djac)
-    class(gs_torflux_map), intent(in) :: self
-    real(r8), intent(in) :: psihat !< Normalized poloidal flux
-    real(r8), intent(out) :: phihat !< Normalized toroidal flux
-    real(r8), intent(out) :: jac !< \f$ d\hat{\Phi}/d\hat{\psi} \f$
-    real(r8), optional, intent(out) :: djac !< \f$ d^2\hat{\Phi}/d\hat{\psi}^2 \f$
-  END SUBROUTINE tmap_eval
-  !> Evaluate \f$ 1-\hat{\psi} \f$ at \f$ 1-\hat{\Phi} \f$ (inverse of @ref tmap_eval)
-  MODULE FUNCTION tmap_inv(self,phihat) result(psihat)
-    class(gs_torflux_map), intent(in) :: self
-    real(r8), intent(in) :: phihat !< Normalized toroidal flux
-    real(r8) :: psihat
-  END FUNCTION tmap_inv
-  !> Reset map to identity
-  MODULE SUBROUTINE tmap_delete(self)
-    class(gs_torflux_map), intent(inout) :: self
-  END SUBROUTINE tmap_delete
-  !> Evaluate flux function at \f$ \psi \f$
-  MODULE FUNCTION flux_func_f(self,psi) result(b)
-    class(flux_func), intent(inout) :: self
-    real(r8), intent(in) :: psi
-    real(r8) :: b
-  END FUNCTION flux_func_f
-  !> Evaluate first derivative of flux function at \f$ \psi \f$
-  MODULE FUNCTION flux_func_fp(self,psi) result(b)
-    class(flux_func), intent(inout) :: self
-    real(r8), intent(in) :: psi
-    real(r8) :: b
-  END FUNCTION flux_func_fp
-  !> Evaluate second derivative of flux function at \f$ \psi \f$
-  MODULE FUNCTION flux_func_fpp(self,psi) result(b)
-    class(flux_func), intent(inout) :: self
-    real(r8), intent(in) :: psi
-    real(r8) :: b
-  END FUNCTION flux_func_fpp
-  !> Set coefficients and refresh derived data
-  MODULE FUNCTION flux_func_set_cofs(self,c) result(ierr)
-    class(flux_func), intent(inout) :: self
-    real(r8), intent(in) :: c(:)
-    integer(i4) :: ierr
-  END FUNCTION flux_func_set_cofs
-  !> Rebuild cumulative integral table on map surfaces (`coord=2` only)
-  MODULE SUBROUTINE flux_func_build_fint(self)
-    class(flux_func), intent(inout) :: self
-  END SUBROUTINE flux_func_build_fint
-  !> Update plasma bounds, toroidal flux map, and F*F'/P flux functions
-  MODULE SUBROUTINE gs_update_flux_funcs(equil,settle,ierr)
-    class(gs_equil), target, intent(inout) :: equil !< G-S object
-    logical, optional, intent(in) :: settle !< Re-place map surfaces until converged (default: `.TRUE.`)
-    integer(i4), optional, intent(out) :: ierr !< Map status: 0 ok, 1 update failed (previous map kept), 2 no closed surfaces (profiles not updated)
-  END SUBROUTINE gs_update_flux_funcs
-  !> Copy toroidal flux map and attach it to the flux functions of `self`
-  MODULE SUBROUTINE gs_copy_torflux(self,source)
-    class(gs_equil), target, intent(inout) :: self !< Destination equilibrium
-    class(gs_equil), intent(in) :: source !< Source equilibrium
-  END SUBROUTINE gs_copy_torflux
-  !> Storage coordinate name for profile files (empty for psi_n)
-  MODULE FUNCTION flux_coord_name(coord) result(name)
-    integer(i4), intent(in) :: coord
-    character(LEN=16) :: name
-  END FUNCTION flux_coord_name
+  !> q, `ravgs`, `fsa_avgs` and `shape_geo` of @ref gs_get_qprof from the cut-cell quadrature (see grad_shaf_qprof.F90)
+  MODULE SUBROUTINE gs_qprof_cutcell(gseq,nr,psi_q,prof,ravgs,fsa_avgs,shape_geo,ok)
+    class(gs_equil), intent(inout) :: gseq !< G-S object
+    integer(4), intent(in) :: nr !< Number of flux surfaces
+    real(8), intent(in) :: psi_q(nr) !< Locations in normalized flux
+    real(8), intent(out) :: prof(nr) !< q at each location
+    real(8), optional, intent(out) :: ravgs(nr,4) !< <R>, <1/R>, <1/R^2>, dV/dPsi
+    real(8), optional, intent(out) :: fsa_avgs(nr,4) !< <|grad(psi)|>, <|grad(psi)|^2>, <B_p^2>, <1/B^2>
+    real(8), optional, intent(out) :: shape_geo(nr,6) !< R_min, R_max, Z_min, Z_max, R(Z_min), R(Z_max)
+    logical, intent(out) :: ok !< All surfaces evaluated (otherwise use the tracer)
+  END SUBROUTINE gs_qprof_cutcell
+  !> @ref gs_trace_surf from the cut-cell quadrature (see grad_shaf_qprof.F90); `npoints=-1` if not available
+  MODULE SUBROUTINE gs_trace_surf_cutcell(gseq,psi_in,points,npoints)
+    class(gs_equil), intent(inout) :: gseq !< G-S object
+    real(8), intent(in) :: psi_in !< Surface location in normalized flux
+    real(8), pointer, dimension(:,:), intent(out) :: points !< Surface points [2,npoints]
+    integer(4), intent(out) :: npoints !< Number of points
+  END SUBROUTINE gs_trace_surf_cutcell
+  !> LCFS outputs of @ref gs_get_qprof from the cut-cell quadrature (see grad_shaf_qprof.F90)
+  MODULE SUBROUTINE gs_lcfs_cutcell(gseq,psi_q1,dl,rbounds,zbounds,ok)
+    class(gs_equil), intent(inout) :: gseq !< G-S object
+    real(8), intent(in) :: psi_q1 !< Surface location in normalized flux
+    real(8), intent(out) :: dl !< Surface length
+    real(8), intent(out) :: rbounds(2,2) !< (R,Z) at minimum and maximum R
+    real(8), intent(out) :: zbounds(2,2) !< (R,Z) at minimum and maximum Z
+    logical, intent(out) :: ok !< Surface evaluated (otherwise use the tracer)
+  END SUBROUTINE gs_lcfs_cutcell
 END INTERFACE
 !---Encapsulation for external function call parameters
 TYPE, PRIVATE :: opt_targets
@@ -1213,7 +1128,7 @@ self%lim_point=source%lim_point
 self%x_points=source%x_points
 self%x_vecs=source%x_vecs
 self%vcontrol_val=source%vcontrol_val
-CALL gs_copy_torflux(self,source)
+IF(ASSOCIATED(source%torflux))CALL source%torflux%copy(self%torflux)
 !---Things that need equilibrium fully setup to copy
 IF(ASSOCIATED(source%P_ani))CALL source%P_ani%copy(self%P_ani,self)
 end subroutine copy_eq
@@ -1330,7 +1245,11 @@ DO i=1,self%ncoils
 END DO
 !
 equil%plasma_bounds=[-1.d99,1.d99]
-CALL gs_update_flux_funcs(equil)
+CALL gs_update_bounds(equil)
+IF(ASSOCIATED(equil%torflux))CALL equil%torflux%update(equil)
+CALL equil%I%update(equil)
+CALL equil%p%update(equil)
+IF(ASSOCIATED(equil%P_ani))CALL equil%P_ani%update(equil)
 !
 IF(self%save_visit)THEN
   CALL equil%psi%get_local(psi_vals)
@@ -2262,7 +2181,7 @@ REAL(8) :: nl_res,psimax,ffp_scale_in,ffp_scale_prev,itor,pnorm0,pnormp,itor_ffp
 REAL(8) :: R0_tmp,R0_hist(2),gpsi0(3),gpsi1(3),gpsi2(3),t0,t1
 REAL(8) :: param_mat(3,3),mat_save(2,2),param_vec(3),param_rhs(3)
 REAL(r8), POINTER :: saddle_save(:,:)
-integer(4) :: i,ii,j,k,error_flag,cell,ierr_loc,ierr_map,map_fails
+integer(4) :: i,ii,j,k,error_flag,cell,ierr_loc,map_fails
 integer(4), parameter :: map_fail_max = 3 !< Consecutive toroidal flux map failures before the solve fails
 integer(4), save :: eq_count = 0
 CHARACTER(LEN=40) :: err_reason
@@ -2314,7 +2233,11 @@ IF(.NOT.self%free)THEN
 END IF
 !---Update flux functions
 equil%o_point(1)=-1.d0
-CALL gs_update_flux_funcs(equil,ierr=ierr_map)
+CALL gs_update_bounds(equil)
+IF(ASSOCIATED(equil%torflux))CALL equil%torflux%update(equil)
+CALL equil%I%update(equil)
+CALL equil%p%update(equil)
+IF(ASSOCIATED(equil%P_ani))CALL equil%P_ani%update(equil)
 CALL count_map_fails
 !---Get J_phi source term
 CALL gs_source(equil,equil%psi,rhs,psi_ffp,psi_press,itor_ffp,itor_press,estored,dflux_ffp)
@@ -2740,8 +2663,12 @@ DO i=1,self%maxits
     CALL equil%psi%add(1.d0,equil%vcontrol_val,psi_vcont)
     ffp_scale_prev=equil%ffp_scale
   END IF
-  !---Update flux functions (map surfaces settle over iterations)
-  CALL gs_update_flux_funcs(equil,settle=.FALSE.,ierr=ierr_map)
+  !---Update flux functions
+  CALL gs_update_bounds(equil)
+  IF(ASSOCIATED(equil%torflux))CALL equil%torflux%update(equil)
+  CALL equil%I%update(equil)
+  CALL equil%p%update(equil)
+  IF(ASSOCIATED(equil%P_ani))CALL equil%P_ani%update(equil)
   CALL count_map_fails
   !---Output
   IF(self%save_visit.AND.self%plot_step)THEN
@@ -2864,7 +2791,7 @@ END IF
 CONTAINS
 !---Track consecutive toroidal flux map failures
 subroutine count_map_fails
-IF(ierr_map==0)THEN
+IF(equil%torflux_ierr==0)THEN
   map_fails=0
 ELSE
   map_fails=map_fails+1
@@ -2914,7 +2841,11 @@ IF(oft_env%pm)THEN
   CALL oft_increase_indent
 END IF
 !---Update flux functions
-CALL gs_update_flux_funcs(equil)
+CALL gs_update_bounds(equil)
+IF(ASSOCIATED(equil%torflux))CALL equil%torflux%update(equil)
+CALL equil%I%update(equil)
+CALL equil%p%update(equil)
+IF(ASSOCIATED(equil%P_ani))CALL equil%P_ani%update(equil)
 !---Get J_phi source term
 CALL gs_source(equil,equil%psi,rhs,psi_ffp,psi_press,itor_ffp,itor_press,estored,dflux_ffp)
 IF(ABS(equil%ffp_scale)>TINY(equil%ffp_scale)*1.d2)CALL psi_ffp%scale(1.d0/equil%ffp_scale)
@@ -4509,7 +4440,7 @@ real(8), pointer :: ptout(:,:)
 real(8), parameter :: tol=1.d-10
 integer(4) :: i,j,cell,imin_r,imax_r,imin_z,imax_z
 integer(4), parameter :: nlcfs=1000
-logical :: lcfs_all,lcfs_any,geo
+logical :: lcfs_all,lcfs_any,geo,cc_ok,cc_prof
 type(gsinv_interp), pointer :: field
 TYPE(spline_type) :: lcfs_rz
 CHARACTER(LEN=OFT_ERROR_SLEN) :: error_str
@@ -4521,6 +4452,16 @@ IF(lcfs_any.AND.(.NOT.lcfs_all))CALL oft_abort('All LCFS arguments must be passe
 IF(lcfs_all.AND.(psi_q(1)>=0.05d0))CALL oft_warn('LCFS parameters requested but "psi_q(1)" far from LCFS, not projecting')
 IF(PRESENT(shape_geo).AND.lcfs_any)CALL oft_abort('"shape_geo" cannot be combined with LCFS arguments', &
   'gs_get_qprof',__FILE__)
+!---Cut-cell quadrature (exact on the FE surface); the field-line tracer below is the deprecated
+!---method (`qprof_backend=1`) and the fallback for surfaces the cut-cell path does not accept.
+!---If only the LCFS outputs fail, the profiles are kept and only `psi_q(1)` is traced.
+cc_prof=.FALSE.
+IF((qprof_backend==0).AND.(.NOT.geo))THEN
+  CALL gs_qprof_cutcell(gseq,nr,psi_q,prof,ravgs,fsa_avgs,shape_geo,cc_prof)
+  cc_ok=cc_prof
+  IF(cc_ok.AND.lcfs_all)CALL gs_lcfs_cutcell(gseq,psi_q(1),dl,rbounds,zbounds,cc_ok)
+  IF(cc_ok)RETURN
+END IF
 !---
 raxis=gseq%o_point(1)
 zaxis=gseq%o_point(2)
@@ -4589,7 +4530,7 @@ active_tracer%zaxis=zaxis
 active_tracer%inv=.TRUE.
 IF(PRESENT(shape_geo))ALLOCATE(ptout(3,active_tracer%maxsteps+1))
 !$omp do schedule(dynamic,1)
-do j=1,nr
+do j=1,MERGE(1,nr,cc_prof)
   !------------------------------------------------------------------------------
   ! Trace contour
   !------------------------------------------------------------------------------
@@ -4630,7 +4571,7 @@ do j=1,nr
   if(active_tracer%status/=1)THEN
     WRITE(error_str,"(A,F10.4)")"gs_get_qprof: Trace did not complete at psi = ",1.d0-psi_q(j)
     CALL oft_warn(error_str)
-    prof(j)=0.d0
+    IF(.NOT.cc_prof)prof(j)=0.d0
     CYCLE
   end if
   !------------------------------------------------------------------------------
@@ -4701,6 +4642,7 @@ do j=1,nr
       IF(.NOT.PRESENT(shape_geo))DEALLOCATE(ptout)
     END IF
   END IF
+  IF(cc_prof)CYCLE ! Profiles kept from the cut-cell path
   !---Safety Factor (q)
   qpsi=fpol*active_tracer%v(3)/(2*pi)
   prof(j)=qpsi
@@ -4739,6 +4681,12 @@ real(8), pointer :: ptout(:,:)
 real(8), parameter :: tol=1.d-10
 integer(4) :: i,j,cell
 type(gsinv_interp), target :: field
+!---Points at uniform polar angle from the cut-cell quadrature (exact on the FE surface);
+!---the field-line tracer below is the deprecated method and the fallback
+IF(qprof_backend==0)THEN
+  CALL gs_trace_surf_cutcell(gseq,psi_in,points,npoints)
+  IF(npoints>0)RETURN
+END IF
 !---
 raxis=gseq%o_point(1)
 zaxis=gseq%o_point(2)
@@ -6120,6 +6068,10 @@ END IF
 IF(ASSOCIATED(self%P_ani))THEN
   CALL self%P_ani%delete()
   DEALLOCATE(self%P_ani)
+END IF
+IF(ASSOCIATED(self%torflux))THEN
+  CALL self%torflux%delete()
+  DEALLOCATE(self%torflux)
 END IF
 end subroutine equil_destroy
 !------------------------------------------------------------------------------

@@ -18,6 +18,10 @@ from ._interface import *
 from ..fe import Lagrange_2D_field_interpolator
 
 
+## Bootstrap current profiles of get_boot_profs, in the Fortran `boot_prof_names` order
+_BOOT_PROF_NAMES = ('psi_n', 'jdotB_bs_raw', 'jphi_bs_raw', 'jphi_pd_raw', 'jphi_total', 'jphi_bs',
+                    'jphi_pd', 'jphi_ind', 'jphi_saw', 'jphi_fixed')
+
 def create_prof_file(self, filename, profile_dict, name):
     '''! Create profile input file to be read by load_profiles()
 
@@ -114,6 +118,65 @@ def create_prof_file(self, filename, profile_dict, name):
         raise KeyError('Invalid profile type ("flat", "linterp", "jphi-linterp", "jphi-split-bootstrap", "mlinterp", "jphi-mlinterp")')
     with open(filename, 'w+') as fid:
         fid.write("\n".join(file_lines))
+
+
+## Keyword inputs of @ref TokaMaker.TokaMaker.solve_bootstrap "solve_bootstrap" kept between calls and in saved files
+_BOOT_INPUT_KEYS = ('F0', 'pres_prof', 'p_fixed_prof', 'jphi_fixed_prof', 'jphi_saw_prof', 'coord')
+
+
+def _save_boot_inputs(filename, inputs):
+    '''! Write the kept `solve_bootstrap` keyword inputs to group `tokamaker/BOOT_INPUTS` of a saved equilibrium'''
+    import h5py
+    with h5py.File(filename, 'a') as fid:
+        tok = fid.require_group('tokamaker')
+        if 'BOOT_INPUTS' in tok:
+            del tok['BOOT_INPUTS']
+        grp = tok.create_group('BOOT_INPUTS')
+        for key, val in inputs.items():
+            if val is None:
+                continue
+            if isinstance(val, dict):
+                sub = grp.create_group(key)
+                for k, v in val.items():
+                    if isinstance(v, str):
+                        sub.attrs[k] = v
+                    else:
+                        sub.create_dataset(k, data=numpy.asarray(v, dtype=numpy.float64))
+            else:
+                grp.attrs[key] = val if isinstance(val, str) else float(val)
+
+
+def _load_boot_inputs(filename):
+    '''! Read the kept `solve_bootstrap` keyword inputs from a saved equilibrium (`None` if the file has none)'''
+    import h5py
+    def _str(v):
+        return v.decode() if isinstance(v, bytes) else v
+    with h5py.File(filename, 'r') as fid:
+        if 'tokamaker/BOOT_INPUTS' not in fid:
+            return None
+        grp = fid['tokamaker/BOOT_INPUTS']
+        inputs = dict.fromkeys(_BOOT_INPUT_KEYS)
+        for key, val in grp.attrs.items():
+            val = _str(val)
+            inputs[key] = val if isinstance(val, str) else float(val)
+        for key, sub in grp.items():
+            prof = {k: numpy.array(sub[k]) for k in sub}
+            prof.update({k: _str(v) for k, v in sub.attrs.items()})
+            inputs[key] = prof
+    return inputs
+
+
+def _boot_state_message(boot_ops, inputs):
+    '''! One-line summary of a loaded bootstrap state (options and kept keyword inputs)'''
+    opts = ', '.join(f'{k}={v!r}' for k, v in boot_ops.items())
+    kept = []
+    for key, val in (inputs or {}).items():
+        if val is None:
+            continue
+        kept.append(key if isinstance(val, dict) else f'{key}={val!r}')
+    return ('Bootstrap state loaded with its solve_bootstrap options and keyword inputs retained. '
+            'Options: ' + opts + '. Keyword inputs: '
+            + (', '.join(kept) if kept else 'none') + '. Run boot_reset() to return them to their defaults.')
 
 
 class tokamaker_settings:
@@ -870,20 +933,33 @@ class TokaMaker():
             raise ValueError("Equilibrium object is `None`")
         return self._tMaker_equil.set_kinetic_profiles(te_prof,ti_prof,ne_prof,ni_prof,Zeff,keep_files,jphi_fixed_prof,jphi_saw_prof)
 
-    def set_boot_ops(self, isolate_edge_jBS=None, parameterize_jBS=None, scale_jBS=None, djBS_tol=None,
-                     diagnose_bs=None, taper_edge_jBS=None, taper_edge_psi0=None, taper_edge_shape=None,
+    def boot_reset(self):
+        r'''! Return the bootstrap options and the keyword inputs that @ref solve_bootstrap keeps between calls
+        (`F0`, `pres_prof`, `p_fixed_prof`, `jphi_fixed_prof`, `jphi_saw_prof`, `coord`) to their defaults
+
+        Loaded equilibria keep the state they were solved with; call this to start the next
+        @ref solve_bootstrap from the defaults instead.
+        '''
+        if self._tMaker_equil is None:
+            raise ValueError("Equilibrium object is `None`")
+        self._tMaker_equil._boot_inputs = None
+        if self._tMaker_equil._boot_ops is not None:
+            self._tMaker_equil._boot_ops = None
+            self._tMaker_equil.set_boot_ops()
+
+    def set_boot_ops(self, isolate_edge_jbs=None, scale_jbs=None, djbs_tol=None,
+                     diagnose_bs=None, taper_edge_jbs=None, taper_edge_psi0=None, taper_edge_shape=None,
                      saw_q_s=None, saw_dq=None, saw_tol=None, saw_relax=None, saw_ramp=None, saw_rule=None):
         r'''! Set bootstrap current options for the jphi-split-bootstrap current profile update.
 
         Call after setting a `jphi-split-bootstrap`-type ffp_prof profile, and before mygs.solve().
         Any `None` value is left unchanged from its current state (for default values see Tokamaker_equilibrium.set_boot_ops).
 
-        @param isolate_edge_jBS Isolate the edge bootstrap spike from the bulk bootstrap current? (Internal default: False)
-        @param parameterize_jBS Use a parametrised skew-normal fit for the edge spike? Overrides `isolate_edge_jBS` if true. (Internal default: False)
-        @param scale_jBS Scaling factor applied to the spike profile. (Internal default: 1.0)
-        @param djBS_tol Threshold on relative change in j_BS to freeze bootstrap values. (Internal default: 1e-4)
-        @param diagnose_bs Print alpha/Ip scalars, j_BS stats, and full profile tables each NL iteration. (Internal default: False)
-        @param taper_edge_jBS Smoothly taper toroidal current (inductive, bootstrap and fixed) to zero at the plasma edge. (Internal default: False)
+        @param isolate_edge_jbs Isolate the edge bootstrap spike from the bulk bootstrap current? (Internal default: False)
+        @param scale_jbs Scaling factor applied to the spike profile. (Internal default: 1.0)
+        @param djbs_tol Threshold on relative change in the bootstrap current to freeze it. (Internal default: 1e-4)
+        @param diagnose_bs Print alpha/Ip scalars, bootstrap current stats, and full profile tables each NL iteration. (Internal default: False)
+        @param taper_edge_jbs Smoothly taper toroidal current (inductive, bootstrap and fixed) to zero at the plasma edge. (Internal default: False)
         @param taper_edge_psi0 psi_N (standard: 0=axis, 1=LCFS) where the taper begins. (Internal default: 0.999)
         @param taper_edge_shape Taper shape: 1=cos²/Hann, 2=quintic smoothstep, 3=cubic power. (Internal default: 2)
         @param saw_q_s Sawtooth reset: q floor of the reset of the base current's q; 0 = off. (Internal default: 0)
@@ -896,18 +972,14 @@ class TokaMaker():
         '''
         if self._tMaker_equil is None:
             raise ValueError("Equilibrium object is `None`")
-        return self._tMaker_equil.set_boot_ops(isolate_edge_jBS, parameterize_jBS, scale_jBS, djBS_tol,
+        return self._tMaker_equil.set_boot_ops(isolate_edge_jbs, scale_jbs, djbs_tol,
                                                diagnose_bs,
-                                               taper_edge_jBS, taper_edge_psi0, taper_edge_shape,
+                                               taper_edge_jbs, taper_edge_psi0, taper_edge_shape,
                                                saw_q_s, saw_dq, saw_tol, saw_relax, saw_ramp, saw_rule)
 
     def get_boot_profs(self):
-        r'''! Get cached bootstrap current profiles from the last call to the G-S solver with a
-        `jphi-split-bootstrap` current profile.
-
-        @result Dictionary with keys `'psi_n'`, `'total_j_phi'`, `'j_bs_final'`, `'j_ind_final'`
-          and (when available) `'jphi_fixed'`, `'j_saw'`, `'saw_rho_m'`, `'saw_rho_out'`, `'saw_n_dips'`, `'j_bs_raw'`.  Returns `None` if no profiles have been computed.
-          `'psi_n'` is in standard convention (0=axis, 1=LCFS). Current densities are in A/m².
+        r'''! Get the current profiles of the last G-S solve with a `jphi-split-bootstrap` current profile
+        (see TokaMaker_equilibrium.get_boot_profs)
         '''
         if self._tMaker_equil is None:
             raise ValueError("Equilibrium object is `None`")
@@ -1402,12 +1474,11 @@ class TokaMaker():
                 raise Exception(error_string.value)
             if initialized.value:
                 tmp_eq._boot_ops = {
-                    'isolate_edge_jBS': bool(bops.isolate_edge_jBS),
-                    'parameterize_jBS': bool(bops.parameterize_jBS),
-                    'scale_jBS':        float(bops.scale_jBS),
-                    'djBS_tol':         float(bops.djBS_tol),
+                    'isolate_edge_jbs': bool(bops.isolate_edge_jbs),
+                    'scale_jbs':        float(bops.scale_jbs),
+                    'djbs_tol':         float(bops.djbs_tol),
                     'diagnose_bs':      bool(bops.diagnose_bs),
-                    'taper_edge_jBS':   bool(bops.taper_edge_jBS),
+                    'taper_edge_jbs':   bool(bops.taper_edge_jbs),
                     'taper_edge_psi0':  float(bops.taper_edge_psi0),
                     'taper_edge_shape': int(bops.taper_edge_shape),
                     'saw_q_s':          float(bops.saw_q_s),
@@ -1419,6 +1490,9 @@ class TokaMaker():
                 }
             else:
                 tmp_eq._boot_ops = None
+            tmp_eq._boot_inputs = _load_boot_inputs(source_file)
+            if tmp_eq._boot_ops is not None:
+                print(_boot_state_message(tmp_eq._boot_ops, tmp_eq._boot_inputs))
         else:
             raise ValueError("Must specify either `source_eq` or `source_file`")
         error_string = self._oft_env.get_c_errorbuff()
@@ -1580,9 +1654,9 @@ class TokaMaker():
           - `modb_avgs` [2, npsi] — flux-surface-averaged magnetic field values:
             row 0: \f$\langle |B| \rangle\f$, row 1: \f$\langle |B|^2 \rangle\f$
           - `eps` [npsi] *(only when `return_eps=True`)* — local inverse aspect ratio
-            \f$\varepsilon = (R_{\max} - R_{\min}) / (2 \langle R \rangle)\f$,
-            where \f$R_{\max}\f$ and \f$R_{\min}\f$ are the maximum and minimum major radius
-            reached by the field-line trace on that surface
+            \f$\varepsilon = (R_{\max} - R_{\min}) / (R_{\max} + R_{\min})\f$ (Redl 2021 \f$r/R_0\f$, with the
+            surface's major radius \f$R_0 = (R_{\max} + R_{\min})/2\f$, as OMFIT and FUSE), where
+            \f$R_{\max}\f$ and \f$R_{\min}\f$ are the maximum and minimum major radius of the surface
         '''
         if self._tMaker_equil is None:
             raise ValueError("Equilibrium object is `None`")
@@ -2202,7 +2276,7 @@ class TokaMaker():
             raise ValueError("Equilibrium object is `None`")
         self._tMaker_equil.save_eqdsk(filename,nr,nz,rbounds,zbounds,run_info,lcfs_pad,rcentr,truncate_eq,limiter_file,lcfs_pressure,cocos)
 
-    def save_ifile(self,filename,npsi=129,ntheta=257,lcfs_pad=0.01,lcfs_pressure=0.0,pack_lcfs=True,single_precision=False):
+    def save_ifile(self,filename,npsi=129,ntheta=257,lcfs_pad=0.01,lcfs_pressure=0.0,pack_lcfs=True,single_precision=False,profile_derivs=False,psi_bounds=False):
         r'''! Save current equilibrium to iFile format
 
         @param filename Filename to save equilibrium to
@@ -2212,10 +2286,12 @@ class TokaMaker():
         @param lcfs_pressure Plasma pressure on the LCFS (zero by default)
         @param pack_lcfs Pack toward LCFS with quadraturic sampling?
         @param single_precision Save single precision file? (default: double precision)
+        @param profile_derivs Append \f$FF'\f$ and \f$P'\f$ records after Z? (extends the i-file format)
+        @param psi_bounds Append the unpadded \f$[\psi_{axis}, \psi_{LCFS}]\f$ record last? (extends the i-file format)
         '''
         if self._tMaker_equil is None:
             raise ValueError("Equilibrium object is `None`")
-        self._tMaker_equil.save_ifile(filename,npsi,ntheta,lcfs_pad,lcfs_pressure,pack_lcfs,single_precision)
+        self._tMaker_equil.save_ifile(filename,npsi,ntheta,lcfs_pad,lcfs_pressure,pack_lcfs,single_precision,profile_derivs,psi_bounds)
 
     def save_mug(self,filename):
         r'''! Save current equilibrium to MUG transfer format
@@ -2378,7 +2454,7 @@ class TokaMaker():
             raise Exception(error_string.value)
         return time.value, dt.value, nl_its.value, lin_its.value, nretry.value
 
-    def solve_bootstrap(self, ffp_prof, te_prof, ne_prof, ti_prof, ni_prof, Zeff, Ip_target, F0=None, pres_prof=None, jphi_fixed_prof=None, p_fixed_prof=None, coord='psi_n', jphi_saw_prof=None, **kwargs):
+    def solve_bootstrap(self, ffp_prof, te_prof, ne_prof, ti_prof, ni_prof, Zeff, Ip_target, F0=None, pres_prof=None, jphi_fixed_prof=None, p_fixed_prof=None, coord=None, jphi_saw_prof=None, **kwargs):
         r'''! Solve G-S equilibrium with self-consistent bootstrap current from kinetic profiles
 
         Derives a pressure-gradient profile \f$P'(\hat{\psi})\f$ from the supplied kinetic
@@ -2388,6 +2464,11 @@ class TokaMaker():
         allowing additional contributions (e.g. fast-ion pressure) to be included provided the
         total pressure is nowhere less than the kinetic pressure.
         Temperature profiles are expected in keV; density profiles in m\f$^{-3}\f$.
+
+        The keyword inputs (`F0`, `pres_prof`, `p_fixed_prof`, `jphi_fixed_prof`, `jphi_saw_prof`, `coord`)
+        and the bootstrap options are kept between calls and in saved equilibria: any left as `None`
+        take the value of the previous call (or of the loaded equilibrium), so repeating a call with the
+        same positional arguments reproduces it. @ref boot_reset returns them to their defaults (shown below).
 
         @param ffp_prof Non-bootstrap toroidal current profile dict (``'x'`` \f$\hat{\psi_n}\f$ grid, ``'y'``: jphi input shape, rescaled internally to match ``Ip_target``)
         @param te_prof Electron temperature profile dict (``'x'``: \f$\hat{\psi_n}\f$, ``'y'``: \f$T_e\f$ [keV])
@@ -2406,22 +2487,20 @@ class TokaMaker():
           from the bootstrap calculation. Mutually exclusive with ``pres_prof``.
         @param jphi_saw_prof Optional input sawtooth toroidal current density profile dict (``'x'``: \f$\hat{\psi_n}\f$,
           ``'y'``: \f$j_\phi\f$ [A/m\f$^2\f$], e.g. a source's sawtooth current), added without rescaling. With
-          ``saw_q_s`` > 0 the reset current is added to it (returned as ``'j_saw'``)
+          ``saw_q_s`` > 0 the reset current is added to it (returned as ``'jphi_saw'``)
         @param coord Coordinate of all ``'x'`` grids: ``'psi_n'`` (default) or ``'phi_n'`` (normalized toroidal flux).
           For ``'phi_n'``, profiles are passed as ``'phi_n_relabel'`` and \f$P'\f$ as \f$dP/d\hat{\Phi}\f$ (``'phi_n'``).
 
         @par Bootstrap solver options (forwarded to ``set_boot_ops()``)
-        @param isolate_edge_jBS Isolate the edge bootstrap spike from the bulk (default: False)
-        @param parameterize_jBS Use a parametrised skew-normal fit for the edge spike;
-          overrides ``isolate_edge_jBS`` if True (default: False)
-        @param scale_jBS Scaling factor applied to the bootstrap current profile (default: 1.0)
-        @param djBS_tol Threshold on relative change in j_BS to freeze bootstrap values (influences solve speed) (default: 1e-4)
+        @param isolate_edge_jbs Isolate the edge bootstrap spike from the bulk (default: False)
+        @param scale_jbs Scaling factor applied to the bootstrap current profile (default: 1.0)
+        @param djbs_tol Threshold on relative change in the bootstrap current to freeze it (influences solve speed) (default: 1e-4)
         @param diagnose_bs Print detailed output at each NL iteration (default: False)
-        @param taper_edge_jBS Smoothly taper toroidal current (inductive, bootstrap and fixed) to zero at the plasma edge (default: False)
+        @param taper_edge_jbs Smoothly taper toroidal current (inductive, bootstrap and fixed) to zero at the plasma edge (default: False)
         @param taper_edge_psi0 \f$\hat{\psi_n}\f$ (0=axis, 1=LCFS) where the taper begins (default: 0.999)
         @param taper_edge_shape Taper shape: 1=cos\f$^2\f$/Hann, 2=quintic smoothstep, 3=cubic power
           (default: 2)
-        @param saw_q_s Sawtooth reset q floor; 0 = off (default: 0, also when omitted after a call that set it). The q of
+        @param saw_q_s Sawtooth reset q floor; 0 = off (default: 0). The q of
           \f$\alpha j_{ind} + j_{BS} + j_{fixed} + j_{saw,in}\f$ in the traced geometry is reset where it dips
           below q_s (``saw_rule``); the Ip-neutral current that does this is added to ``j_saw``
         @param saw_dq, saw_tol, saw_relax, saw_ramp, saw_rule See ``set_boot_ops()``
@@ -2431,18 +2510,37 @@ class TokaMaker():
           (see doc_tokamaker_current_conventions):
           - ``'psi_n'`` Normalised poloidal flux grid (0 = axis, 1 = LCFS) of the ``ffp_prof['x']`` nodes
             (mapped from toroidal flux if ``coord='phi_n'``)
-          - ``'total_j_phi'`` Total toroidal current density = j_ind_final + j_bs_final + jphi_fixed + j_saw [A/m²]
-          - ``'j_ind_final'`` Input ``ffp_prof['y']`` re-scaled and (optionally) tapered [A/m²]
-          - ``'j_bs_final'`` Bootstrap current density (optionally isolated / parametrised / tapered) [A/m²]
+          - ``'jdotB_bs_raw'`` The Redl \f$\langle j_{BS} \cdot B \rangle\f$ behind ``'jphi_bs_raw'`` [T A/m²]
+          - ``'jphi_bs_raw'`` Bootstrap current density from the Redl PoP 2021 formula,
+            \f$\langle j_{BS} \cdot B \rangle F \langle 1/R \rangle/\langle B^2 \rangle + P'(\langle R \rangle - F^2 \langle 1/R \rangle/\langle B^2 \rangle)\f$ [A/m²]
+          - ``'jphi_pd_raw'`` Pressure-driven (diamagnetic + Pfirsch-Schlueter) part of ``'jphi_bs_raw'``,
+            \f$P'(\langle R \rangle - F^2 \langle 1/R \rangle/\langle B^2 \rangle)\f$ [A/m²]
+          - ``'jphi_total'`` Total toroidal current density = jphi_ind + jphi_bs + jphi_saw + jphi_fixed [A/m²]
+          - ``'jphi_bs'`` Bootstrap current density (optionally isolated / tapered) [A/m²]
+          - ``'jphi_pd'`` ``'jphi_pd_raw'`` times ``scale_jbs``, (optionally) tapered; not
+            isolated, so it is the pressure-driven part of ``'jphi_bs'`` only when
+            ``isolate_edge_jbs`` is off [A/m²]
+          - ``'jphi_ind'`` Input ``ffp_prof['y']`` re-scaled and (optionally) tapered [A/m²]
+          - ``'jphi_saw'`` Sawtooth current: ``jphi_saw_prof`` (optionally tapered) plus the reset current [A/m²]
           - ``'jphi_fixed'`` Fixed current density ``jphi_fixed_prof`` (optionally tapered, zero if not set) [A/m²]
-          - ``'j_saw'`` Sawtooth current: ``jphi_saw_prof`` (optionally tapered) plus the reset current [A/m²]
           - ``'saw_rho_m'``, ``'saw_rho_out'``, ``'saw_n_dips'`` Sawtooth radius (q_s + dq crossing beyond the outermost
             q < q_s, \f$\rho_{tor,N}\f$), outer end of the reset and number of regions reset, at the last reset
-          - ``'j_bs_raw'`` Bootstrap current density from the Redl PoP 2021 formula,
-            \f$\langle j_{BS} \cdot B \rangle F \langle 1/R \rangle/\langle B^2 \rangle + P'(\langle R \rangle - F^2 \langle 1/R \rangle/\langle B^2 \rangle)\f$ [A/m²]
-          - ``'jdotb_bs_raw'`` The Redl \f$\langle j_{BS} \cdot B \rangle\f$ behind ``'j_bs_raw'`` [T A/m²]
         '''
         from scipy.interpolate import Akima1DInterpolator
+        # Keyword inputs left as None keep their values from the previous call or the loaded state
+        kept = self._tMaker_equil._boot_inputs or {}
+        if F0 is None:
+            F0 = kept.get('F0')
+        if coord is None:
+            coord = kept.get('coord') or 'psi_n'
+        if (pres_prof is None) and (p_fixed_prof is None):
+            pres_prof, p_fixed_prof = kept.get('pres_prof'), kept.get('p_fixed_prof')
+        if jphi_fixed_prof is None:
+            jphi_fixed_prof = kept.get('jphi_fixed_prof')
+        if jphi_saw_prof is None:
+            jphi_saw_prof = kept.get('jphi_saw_prof')
+        boot_inputs = copy.deepcopy({'F0': F0, 'pres_prof': pres_prof, 'p_fixed_prof': p_fixed_prof,
+                                     'jphi_fixed_prof': jphi_fixed_prof, 'jphi_saw_prof': jphi_saw_prof, 'coord': coord})
         if coord not in ('psi_n', 'phi_n'):
             raise ValueError(f"coord must be 'psi_n' or 'phi_n' (got {coord!r})")
         # --- Type / shape check on ffp_prof ---
@@ -2456,6 +2554,8 @@ class TokaMaker():
                              f"(got {len(ffp_prof['x'])} and {len(ffp_prof['y'])})")
         if ffp_prof.get('type', 'jphi-split-bootstrap') != 'jphi-split-bootstrap':
             raise ValueError(f"ffp_prof 'type' must be 'jphi-split-bootstrap' (got {ffp_prof['type']!r})")
+        # Work on copies so the caller's profile dicts are not modified
+        ffp_prof, te_prof, ti_prof = dict(ffp_prof), dict(te_prof), dict(ti_prof)
         ffp_prof.setdefault('type', 'jphi-split-bootstrap')
 
         # Check temperature profiles are KeV
@@ -2501,7 +2601,12 @@ class TokaMaker():
             pressure = pres_vals
         pp_vals = Akima1DInterpolator(psi_sample, pressure).derivative()(psi_sample)
         pp_vals[-1] = 0.0
-        pp_prof = {'type': 'linterp', 'x': psi_sample, 'y': pp_vals / pp_vals[0]}
+        # Shape only (the pax target sets the scale): normalise by the largest |P'|, which is
+        # nonzero unless the pressure is flat (P'(axis) can be 0 for a flat core)
+        pp_norm = pp_vals[numpy.argmax(numpy.abs(pp_vals))]
+        if pp_norm == 0.0:
+            raise ValueError("The pressure profile is flat (P' = 0 everywhere)")
+        pp_prof = {'type': 'linterp', 'x': psi_sample, 'y': pp_vals / pp_norm}
         if coord == 'phi_n':
             # Values are relabelled onto toroidal flux; P' above is dP/dPhi_N
             pp_prof['coord'] = 'phi_n'
@@ -2521,7 +2626,7 @@ class TokaMaker():
         if ffp_prof['x'][0] > 0:
             warn(f"Bootstrap solver expects profiles defined at psi=0 (axis). Current axis-pressure evaluated at psi_N={ffp_prof['x'][0]:.3f}. Consider extending profile to psi=0 for increased accuracy.", UserWarning, stacklevel=2)
 
-        # Zero profile when unset, so a previous call's jphi_fixed does not persist
+        # Zero profile when unset (no kept value either)
         if jphi_fixed_prof is None:
             jphi_fixed_prof = {'type': 'linterp', 'x': numpy.array([0.0, 1.0]), 'y': numpy.zeros(2)}
         if jphi_saw_prof is None:
@@ -2544,9 +2649,8 @@ class TokaMaker():
             pp_prof=pp_prof,
             foffset=F0,
         )
-        # The sawtooth reset is per solve, like jphi_fixed: off unless saw_q_s is passed
-        kwargs.setdefault('saw_q_s', 0.0)
-        self.set_boot_ops(**kwargs) # Must come after set_profiles
+        self.set_boot_ops(**kwargs) # Must come after set_profiles (options not passed keep their current values)
+        self._tMaker_equil._boot_inputs = boot_inputs
         self.solve()
 
         # Extract bootstrap profiles
@@ -2604,6 +2708,8 @@ class TokaMaker_equilibrium():
             self._mirnov_constraints = None
             ## Shadow of `gs_equil%boot_ops`; `None` until first call to `set_boot_ops`
             self._boot_ops = None
+            ## Keyword inputs of the last `solve_bootstrap` call (kept between calls and in saved files)
+            self._boot_inputs = None
         else:
             self._F0 = copy.copy(source_eq._F0)
             if skip_targets:
@@ -2634,6 +2740,7 @@ class TokaMaker_equilibrium():
                 self._mirnov_constraints = (source_eq._mirnov_constraints[0].copy(), source_eq._mirnov_constraints[1].copy(), source_eq._mirnov_constraints[2].copy()) if source_eq._mirnov_constraints is not None else None
             ## Shadow of `gs_equil%boot_ops`; copied so subsequent set_boot_ops calls update from the source state
             self._boot_ops = copy.copy(source_eq._boot_ops)
+            self._boot_inputs = copy.deepcopy(source_eq._boot_inputs)
         ## Normalized flux convention (0 -> tokamak, 1 -> spheromak)
         self.psi_convention = self._tMaker.psi_convention
         ## Free or fixed boundary flag
@@ -3092,20 +3199,19 @@ class TokaMaker_equilibrium():
                 except:
                     print('Warning: unable to delete temporary file "{0}"'.format(file))
 
-    def set_boot_ops(self, isolate_edge_jBS=None, parameterize_jBS=None, scale_jBS=None, djBS_tol=None,
-                     diagnose_bs=None, taper_edge_jBS=None, taper_edge_psi0=None, taper_edge_shape=None,
+    def set_boot_ops(self, isolate_edge_jbs=None, scale_jbs=None, djbs_tol=None,
+                     diagnose_bs=None, taper_edge_jbs=None, taper_edge_psi0=None, taper_edge_shape=None,
                      saw_q_s=None, saw_dq=None, saw_tol=None, saw_relax=None, saw_ramp=None, saw_rule=None):
         r'''! Set bootstrap current options for the jphi-split-bootstrap current profile update.
 
         Call after setting a `jphi-split-bootstrap`-type ffp_prof profile, and before mygs.solve().
         Any `None` value is left unchanged from current state (see initialisations in dict. below).
 
-        @param isolate_edge_jBS Isolate the edge bootstrap spike from the bulk bootstrap current? (Internal default: False)
-        @param parameterize_jBS Use a parametrised skew-normal fit for the edge spike? Overrides `isolate_edge_jBS` if true. (Internal default: False)
-        @param scale_jBS Scaling factor applied to the spike profile. (Internal default: 1.0)
-        @param djBS_tol Threshold on relative change in j_BS to freeze bootstrap values. Influences bootstrap solve walltime (Internal default: 1e-4)
-        @param diagnose_bs Print alpha/Ip scalars, j_BS stats, and full profile tables each NL iteration. (Internal default: False)
-        @param taper_edge_jBS Smoothly taper toroidal current (inductive, bootstrap and fixed) to zero at the plasma edge. (Internal default: False)
+        @param isolate_edge_jbs Isolate the edge bootstrap spike from the bulk bootstrap current? (Internal default: False)
+        @param scale_jbs Scaling factor applied to the spike profile. (Internal default: 1.0)
+        @param djbs_tol Threshold on relative change in the bootstrap current to freeze it. Influences bootstrap solve walltime (Internal default: 1e-4)
+        @param diagnose_bs Print alpha/Ip scalars, bootstrap current stats, and full profile tables each NL iteration. (Internal default: False)
+        @param taper_edge_jbs Smoothly taper toroidal current (inductive, bootstrap and fixed) to zero at the plasma edge. (Internal default: False)
         @param taper_edge_psi0 psi_N (standard: 0=axis, 1=LCFS) where the taper begins. (Internal default: 0.999)
         @param taper_edge_shape Taper shape: 1=cos²/Hann, 2=quintic smoothstep, 3=cubic power. (Internal default: 2)
         @param saw_q_s Sawtooth reset q floor; 0 = off. (Internal default: 0)
@@ -3119,12 +3225,11 @@ class TokaMaker_equilibrium():
         # On first call, seed the shadow dict from the Fortran-type defaults in grad_shaf.F90
         if self._boot_ops is None:
             self._boot_ops = {
-                'isolate_edge_jBS': False,
-                'parameterize_jBS': False,
-                'scale_jBS': 1.0,
-                'djBS_tol': 1.0e-4,
+                'isolate_edge_jbs': False,
+                'scale_jbs': 1.0,
+                'djbs_tol': 1.0e-4,
                 'diagnose_bs': False,
-                'taper_edge_jBS': False,
+                'taper_edge_jbs': False,
                 'taper_edge_psi0': 0.999,
                 'taper_edge_shape': 2,
                 'saw_q_s': 0.0,
@@ -3135,18 +3240,16 @@ class TokaMaker_equilibrium():
                 'saw_rule': 2,
             }
         # Override only the explicitly provided kwargs
-        if isolate_edge_jBS is not None:
-            self._boot_ops['isolate_edge_jBS'] = bool(isolate_edge_jBS)
-        if parameterize_jBS is not None:
-            self._boot_ops['parameterize_jBS'] = bool(parameterize_jBS)
-        if scale_jBS is not None:
-            self._boot_ops['scale_jBS'] = float(scale_jBS)
-        if djBS_tol is not None:
-            self._boot_ops['djBS_tol'] = float(djBS_tol)
+        if isolate_edge_jbs is not None:
+            self._boot_ops['isolate_edge_jbs'] = bool(isolate_edge_jbs)
+        if scale_jbs is not None:
+            self._boot_ops['scale_jbs'] = float(scale_jbs)
+        if djbs_tol is not None:
+            self._boot_ops['djbs_tol'] = float(djbs_tol)
         if diagnose_bs is not None:
             self._boot_ops['diagnose_bs'] = bool(diagnose_bs)
-        if taper_edge_jBS is not None:
-            self._boot_ops['taper_edge_jBS'] = bool(taper_edge_jBS)
+        if taper_edge_jbs is not None:
+            self._boot_ops['taper_edge_jbs'] = bool(taper_edge_jbs)
         if taper_edge_psi0 is not None:
             self._boot_ops['taper_edge_psi0'] = float(taper_edge_psi0)
         if taper_edge_shape is not None:
@@ -3162,12 +3265,11 @@ class TokaMaker_equilibrium():
             raise ValueError("saw options: need saw_q_s >= 0, saw_dq > 0, 0 < saw_relax <= 1, saw_ramp >= 0, saw_rule in (1, 2)")
         # Build the ctypes struct from the merged shadow state and send to Fortran
         bops = tokamaker_boot_ops_struct()
-        bops.isolate_edge_jBS = self._boot_ops['isolate_edge_jBS']
-        bops.parameterize_jBS = self._boot_ops['parameterize_jBS']
-        bops.scale_jBS = self._boot_ops['scale_jBS']
-        bops.djBS_tol = self._boot_ops['djBS_tol']
+        bops.isolate_edge_jbs = self._boot_ops['isolate_edge_jbs']
+        bops.scale_jbs = self._boot_ops['scale_jbs']
+        bops.djbs_tol = self._boot_ops['djbs_tol']
         bops.diagnose_bs = self._boot_ops['diagnose_bs']
-        bops.taper_edge_jBS = self._boot_ops['taper_edge_jBS']
+        bops.taper_edge_jbs = self._boot_ops['taper_edge_jbs']
         bops.taper_edge_psi0 = self._boot_ops['taper_edge_psi0']
         bops.taper_edge_shape = self._boot_ops['taper_edge_shape']
         for _k in ('saw_q_s', 'saw_dq', 'saw_tol', 'saw_relax', 'saw_ramp', 'saw_rule'):
@@ -3178,77 +3280,38 @@ class TokaMaker_equilibrium():
             raise Exception(error_string.value)
 
     def get_boot_profs(self):
-        r'''! Get cached bootstrap current profiles from the last call to the G-S solver with a
-        `jphi-split-bootstrap` current profile.
+        r'''! Get the current profiles of the last G-S solve with a `jphi-split-bootstrap` current profile
 
-        @result Dictionary with keys `'psi_n'`, `'total_j_phi'`, `'j_bs_final'`, `'j_ind_final'`
-          and (when available) `'jphi_fixed'`, `'j_saw'`, `'saw_rho_m'`, `'saw_rho_out'`, `'saw_n_dips'`, `'j_bs_raw'`, `'jdotb_bs_raw'`.  Returns `None` if no
-          profiles have been computed.  All arrays are 1-D numpy arrays of length *npsi*.  `'psi_n'` is
-          in standard convention (0 = axis, 1 = LCFS).  Current densities are TokaMaker
-          \f$j_\phi = \langle j_\phi \rangle\f$ in A/m² (see doc_tokamaker_current_conventions);
-          `'jdotb_bs_raw'` is the Redl \f$\langle j_{BS} \cdot B \rangle\f$ [T A/m²] behind `'j_bs_raw'`.
+        @result Dictionary of 1-D numpy arrays, keys `_BOOT_PROF_NAMES` (those available), or `None`
+          if no profiles have been computed. `'psi_n'` is in standard convention (0 = axis, 1 = LCFS).
+          Current densities are TokaMaker \f$j_\phi = \langle j_\phi \rangle\f$ in A/m² (see
+          doc_tokamaker_current_conventions); `'jdotB_bs_raw'` is the Redl
+          \f$\langle j_{BS} \cdot B \rangle\f$ [T A/m²] behind `'jphi_bs_raw'`. `_raw`: from the last
+          bootstrap evaluation, before scaling, isolation and taper; no suffix: as added into `'jphi_total'`.
+          It also holds the sawtooth scalars `'saw_rho_m'`, `'saw_rho_out'`, `'saw_n_dips'` (zero without a reset).
         '''
-        n = c_int(0)
-        n_raw = c_int(0)
-        psi_n_ptr = c_double_ptr()
-        total_j_phi_ptr = c_double_ptr()
-        j_bs_final_ptr = c_double_ptr()
-        j_ind_final_ptr = c_double_ptr()
-        jphi_fixed_ptr = c_double_ptr()
-        j_saw_ptr = c_double_ptr()
-        saw_rho_m = c_double(0.0)
-        saw_rho_out = c_double(0.0)
-        saw_n_dips = c_int(0)
-        j_bs_raw_ptr = c_double_ptr()
-        jdotb_bs_raw_ptr = c_double_ptr()
-        error_string = self._oft_env.get_c_errorbuff()
-        tokamaker_get_boot_profs(self.c_ptr,
-            ctypes.byref(n), ctypes.byref(psi_n_ptr),
-            ctypes.byref(total_j_phi_ptr), ctypes.byref(j_bs_final_ptr),
-            ctypes.byref(j_ind_final_ptr), ctypes.byref(jphi_fixed_ptr),
-            ctypes.byref(j_saw_ptr), ctypes.byref(saw_rho_m), ctypes.byref(saw_rho_out), ctypes.byref(saw_n_dips),
-            ctypes.byref(n_raw), ctypes.byref(j_bs_raw_ptr), ctypes.byref(jdotb_bs_raw_ptr),
-            error_string)
-        if error_string.value != b'':
-            raise Exception(error_string.value)
-        if n.value != n_raw.value:
-            warn(
-                f"Bootstrap profile size mismatch: total_j_phi group has {n.value} points but "
-                f"j_bs_raw has {n_raw.value} points — jphi_bs_update may not have run correctly.",
-                UserWarning, stacklevel=2)
         result = {}
-        if n.value > 0:
-            result['psi_n'] = numpy.ctypeslib.as_array(psi_n_ptr, shape=(n.value,)).copy()
-            result['total_j_phi'] = numpy.ctypeslib.as_array(total_j_phi_ptr, shape=(n.value,)).copy()
-            result['j_bs_final'] = numpy.ctypeslib.as_array(j_bs_final_ptr, shape=(n.value,)).copy()
-            result['j_ind_final'] = numpy.ctypeslib.as_array(j_ind_final_ptr, shape=(n.value,)).copy()
-            if jphi_fixed_ptr:
-                result['jphi_fixed'] = numpy.ctypeslib.as_array(jphi_fixed_ptr, shape=(n.value,)).copy()
-            if j_saw_ptr:
-                result['j_saw'] = numpy.ctypeslib.as_array(j_saw_ptr, shape=(n.value,)).copy()
-            result['saw_rho_m'] = float(saw_rho_m.value)
-            result['saw_rho_out'] = float(saw_rho_out.value)
-            result['saw_n_dips'] = int(saw_n_dips.value)
-        if n_raw.value > 0:
-            result['j_bs_raw'] = numpy.ctypeslib.as_array(j_bs_raw_ptr, shape=(n_raw.value,)).copy()
-            if jdotb_bs_raw_ptr:
-                result['jdotb_bs_raw'] = numpy.ctypeslib.as_array(jdotb_bs_raw_ptr, shape=(n_raw.value,)).copy()
+        n = c_int(0)
+        prof_ptr = c_double_ptr()
+        error_string = self._oft_env.get_c_errorbuff()
+        for name in _BOOT_PROF_NAMES:
+            tokamaker_get_boot_prof(self.c_ptr, c_char_p(name.encode()), ctypes.byref(n), ctypes.byref(prof_ptr), error_string)
+            if error_string.value != b'':
+                raise Exception(error_string.value)
+            if n.value > 0:
+                result[name] = numpy.ctypeslib.as_array(prof_ptr, shape=(n.value,)).copy()
+        if result:
+            saw_rho_m, saw_rho_out, saw_n_dips = c_double(0.0), c_double(0.0), c_int(0)
+            tokamaker_get_boot_saw(self.c_ptr, ctypes.byref(saw_rho_m), ctypes.byref(saw_rho_out),
+                                   ctypes.byref(saw_n_dips), error_string)
+            result.update(saw_rho_m=saw_rho_m.value, saw_rho_out=saw_rho_out.value, saw_n_dips=saw_n_dips.value)
         if result and (self.psi_convention == 0):
-            # Convert from OFT convention (0=LCFS, ascending toward axis) to
-            # standard convention (0=axis, ascending toward LCFS)
+            # OFT convention (0 = LCFS, LCFS first) to standard convention (0 = axis, axis first)
             if 'psi_n' in result:
-                result['psi_n'] = (1.0 - result['psi_n'])[::-1].copy()
-                result['total_j_phi'] = result['total_j_phi'][::-1].copy()
-                result['j_bs_final'] = result['j_bs_final'][::-1].copy()
-                result['j_ind_final'] = result['j_ind_final'][::-1].copy()
-                if 'jphi_fixed' in result:
-                    result['jphi_fixed'] = result['jphi_fixed'][::-1].copy()
-                if 'j_saw' in result:
-                    result['j_saw'] = result['j_saw'][::-1].copy()
-            if 'j_bs_raw' in result:
-                result['j_bs_raw'] = result['j_bs_raw'][::-1].copy()
-            if 'jdotb_bs_raw' in result:
-                result['jdotb_bs_raw'] = result['jdotb_bs_raw'][::-1].copy()
+                result['psi_n'] = 1.0 - result['psi_n']
+            for key in result:
+                if isinstance(result[key], numpy.ndarray):
+                    result[key] = result[key][::-1].copy()
         return result if result else None
 
     def set_resistivity(self, eta_prof=None):
@@ -3766,9 +3829,9 @@ class TokaMaker_equilibrium():
           - `modb_avgs` [2, npsi] — flux-surface-averaged magnetic field values:
             row 0: \f$\langle |B| \rangle\f$, row 1: \f$\langle |B|^2 \rangle\f$
           - `eps` [npsi] *(only when `return_eps=True`)* — local inverse aspect ratio
-            \f$\varepsilon = (R_{\max} - R_{\min}) / (2 \langle R \rangle)\f$,
-            where \f$R_{\max}\f$ and \f$R_{\min}\f$ are the maximum and minimum major radius
-            reached by the field-line trace on that surface
+            \f$\varepsilon = (R_{\max} - R_{\min}) / (R_{\max} + R_{\min})\f$ (Redl 2021 \f$r/R_0\f$, with the
+            surface's major radius \f$R_0 = (R_{\max} + R_{\min})/2\f$, as OMFIT and FUSE), where
+            \f$R_{\max}\f$ and \f$R_{\min}\f$ are the maximum and minimum major radius of the surface
         '''
         if psi is None:
             psi = numpy.linspace(psi_pad,1.0-psi_pad,npsi,dtype=numpy.float64)
@@ -4028,7 +4091,7 @@ class TokaMaker_equilibrium():
         if error_string.value != b'':
             raise Exception(error_string.value)
 
-    def save_ifile(self,filename,npsi=129,ntheta=257,lcfs_pad=0.01,lcfs_pressure=0.0,pack_lcfs=True,single_precision=False):
+    def save_ifile(self,filename,npsi=129,ntheta=257,lcfs_pad=0.01,lcfs_pressure=0.0,pack_lcfs=True,single_precision=False,profile_derivs=False,psi_bounds=False):
         r'''! Save current equilibrium to iFile format
 
         @param filename Filename to save equilibrium to
@@ -4038,10 +4101,12 @@ class TokaMaker_equilibrium():
         @param lcfs_pressure Plasma pressure on the LCFS (zero by default)
         @param pack_lcfs Pack toward LCFS with quadraturic sampling?
         @param single_precision Save single precision file? (default: double precision)
+        @param profile_derivs Append \f$FF'\f$ and \f$P'\f$ records after Z? (extends the i-file format)
+        @param psi_bounds Append the unpadded \f$[\psi_{axis}, \psi_{LCFS}]\f$ record last? (extends the i-file format)
         '''
         cfilename = self._oft_env.path2c(filename)
         error_string = self._oft_env.get_c_errorbuff()
-        tokamaker_save_ifile(self._equil_ptr,cfilename,npsi,ntheta,lcfs_pad,lcfs_pressure,pack_lcfs,single_precision,error_string)
+        tokamaker_save_ifile(self._equil_ptr,cfilename,npsi,ntheta,lcfs_pad,lcfs_pressure,pack_lcfs,single_precision,profile_derivs,psi_bounds,error_string)
         if error_string.value != b'':
             raise Exception(error_string.value)
 
@@ -4066,3 +4131,5 @@ class TokaMaker_equilibrium():
         tokamaker_save_tokamaker(self._equil_ptr,cfilename,error_string)
         if error_string.value != b'':
             raise Exception(error_string.value)
+        if self._boot_inputs is not None:
+            _save_boot_inputs(filename, self._boot_inputs)

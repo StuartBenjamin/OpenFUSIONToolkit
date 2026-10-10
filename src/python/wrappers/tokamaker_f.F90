@@ -33,15 +33,16 @@ USE axi_green, ONLY: green
 USE oft_gs, ONLY: gs_factory, gs_equil, gs_save_fields, gs_setup_walls, build_dels, flux_func, &
   gs_fixed_vflux, gs_get_qprof, gs_trace_surf, gs_b_interp, gs_j_interp, gs_prof_interp, &
   gs_plasma_mutual, gs_source, gs_err_reason, gs_coil_source, gs_coil_source_distributed, gs_vacuum_solve, &
-  gs_coil_mutual, gs_coil_mutual_distributed, gs_project_b, gs_save_mug, gs_update_bounds
+  gs_coil_mutual, gs_coil_mutual_distributed, gs_project_b, gs_save_mug, gs_update_bounds, qprof_trace_tol, &
+  qprof_backend
 USE oft_gs_util, ONLY: gs_comp_globals, gs_save_eqdsk, gs_save_ifile, gs_profile_load, gs_profile_save, &
   gs_calc_vloop, gs_save_tokamaker, gs_load_tokamaker
-USE oft_gs, ONLY: torflux_qgeom_backend, qprof_trace_tol
+USE oft_gs_profiles, ONLY: torflux_qgeom_backend, torflux_map, torflux_setup, torflux_attach, torflux_unwrap
 USE oft_gs_cutcell, ONLY: gs_qgeom_cutcell
 USE oft_gs_fit, ONLY: fit_gs, fit_gs_error, fit_gs_setup, fit_gs_destroy, fit_constraint_ptr, fit_pm
 USE oft_gs_td, ONLY: oft_tmaker_td, eig_gs_td
 USE grad_shaf_prof_phys, ONLY: create_dipole_b0_prof, dipole_ani_press, mirror_ani_slosh
-USE grad_shaf_bootstrap, ONLY: jphi_bs_flux_func, sauter_fc, saw_reset_1d
+USE grad_shaf_bootstrap, ONLY: jphi_bs_flux_func, sauter_fc, saw_reset_1d, boot_prof_access
 USE diagnostic, ONLY: bscal_surf_int
 USE oft_base_f, ONLY: copy_string, copy_string_rev, oftpy_init
 IMPLICIT NONE
@@ -87,12 +88,11 @@ END TYPE tokamaker_recon_settings_type
 !> BIND(C) mirror of the `boot_ops` type for passing bootstrap options from Python
 !---------------------------------------------------------------------------------
 TYPE, BIND(C) :: tokamaker_boot_ops_type
-  LOGICAL(c_bool) :: isolate_edge_jBS = .FALSE.  !< Isolate edge j_BS spike
-  LOGICAL(c_bool) :: parameterize_jBS = .FALSE.  !< Overrides `isolate_edge_jBS` if true
-  REAL(c_double)  :: scale_jBS = 1.0d0           !< Scaling factor for j_BS
-  REAL(c_double)  :: djBS_tol = 1.0d-4            !< Threshold on rel. change in j_BS to freeze values
+  LOGICAL(c_bool) :: isolate_edge_jbs = .FALSE.  !< Isolate the edge bootstrap spike
+  REAL(c_double)  :: scale_jbs = 1.0d0           !< Scaling factor for the bootstrap current
+  REAL(c_double)  :: djbs_tol = 1.0d-4            !< Threshold on rel. change in the bootstrap current to freeze it
   LOGICAL(c_bool) :: diagnose_bs = .FALSE.        !< Print diagnostic output
-  LOGICAL(c_bool) :: taper_edge_jBS = .FALSE.      !< Taper j_BS at edge (guards against separatrix issues)
+  LOGICAL(c_bool) :: taper_edge_jbs = .FALSE.      !< Taper the current at the edge (guards against separatrix issues)
   REAL(c_double)  :: taper_edge_psi0 = 0.999d0   !< Taper onset psi_N (default 0.999)
   INTEGER(c_int)  :: taper_edge_shape = 2         !< Taper shape: 2 = quintic smoothstep (default)
   REAL(c_double)  :: saw_q_s = 0.d0               !< Sawtooth reset q on axis (0 = off)
@@ -157,6 +157,7 @@ ELSE
     RETURN
   END IF
   CALL new_equil%copy(old_equil)
+  CALL torflux_setup(new_equil)
 END IF
 new_equil_ptr=C_LOC(new_equil)
 END SUBROUTINE tokamaker_equil_copy
@@ -462,7 +463,7 @@ IF(TRIM(tmp_str)/='none')THEN
   CALL gs_profile_load(tmp_str,prof_tmp)
   IF(ASSOCIATED(tMaker_equil_obj%I))THEN
     prof_tmp%f_offset=tMaker_equil_obj%I%f_offset ! Persist F0 with profile changes
-    prof_tmp%tmap=>tMaker_equil_obj%tmap ! Current toroidal flux map (if coord/=0)
+    CALL torflux_attach(prof_tmp,tMaker_equil_obj) ! Current toroidal flux map (if on toroidal flux)
     IF(prof_tmp%update_on_load)CALL prof_tmp%update(tMaker_equil_obj) ! Initialize new profile with current EQ
   END IF
   tMaker_equil_obj%I=>prof_tmp
@@ -474,6 +475,7 @@ CALL copy_string_rev(eta_file,tmp_str)
 IF(TRIM(tmp_str)/='none')CALL gs_profile_load(tmp_str,tMaker_equil_obj%eta)
 CALL copy_string_rev(f_NI_file,tmp_str)
 IF(TRIM(tmp_str)/='none')CALL gs_profile_load(tmp_str,tMaker_equil_obj%I_NI)
+CALL torflux_setup(tMaker_equil_obj,resettle=.TRUE.)
 END SUBROUTINE tokamaker_load_profiles
 !---------------------------------------------------------------------------------
 !> Retrieve degrees of freedom for desired flux profile
@@ -600,6 +602,7 @@ CALL copy_string_rev(jphi_fixed_file,tmp_str)
 IF(TRIM(tmp_str)/='none')CALL gs_profile_load(tmp_str,tMaker_equil_obj%jphi_fixed)
 CALL copy_string_rev(jphi_saw_file,tmp_str)
 IF(TRIM(tmp_str)/='none')CALL gs_profile_load(tmp_str,tMaker_equil_obj%jphi_saw)
+CALL torflux_setup(tMaker_equil_obj,resettle=.TRUE.)
 END SUBROUTINE tokamaker_load_kinetic_profiles
 !---------------------------------------------------------------------------------
 !> Set bootstrap current options on the jphi_bs_flux_func object inside gs_equil.
@@ -612,17 +615,18 @@ SUBROUTINE tokamaker_set_boot_ops(tMaker_equil_ptr,bops,error_str) BIND(C,NAME="
 TYPE(c_ptr), VALUE, INTENT(in) :: tMaker_equil_ptr !< Pointer to TokaMaker equilibrium object
 TYPE(tokamaker_boot_ops_type), INTENT(in) :: bops !< Bootstrap options to apply
 CHARACTER(KIND=c_char), INTENT(out) :: error_str(OFT_ERROR_SLEN) !< Error string (empty if no error)
+CLASS(flux_func), POINTER :: I_base
 TYPE(gs_equil), POINTER :: tMaker_equil_obj
 IF(.NOT.tokamaker_equil_ccast(tMaker_equil_ptr,tMaker_equil_obj,error_str))RETURN
-SELECT TYPE(I => tMaker_equil_obj%I)
+I_base=>torflux_unwrap(tMaker_equil_obj%I)
+SELECT TYPE(I => I_base)
 TYPE IS (jphi_bs_flux_func)
   I%boot_ops%initialized = .TRUE.
-  I%boot_ops%isolate_edge_jBS = bops%isolate_edge_jBS
-  I%boot_ops%parameterize_jBS = bops%parameterize_jBS
-  I%boot_ops%scale_jBS = bops%scale_jBS
-  I%boot_ops%djBS_tol = bops%djBS_tol
+  I%boot_ops%isolate_edge_jbs = bops%isolate_edge_jbs
+  I%boot_ops%scale_jbs = bops%scale_jbs
+  I%boot_ops%djbs_tol = bops%djbs_tol
   I%boot_ops%diagnose_bs = bops%diagnose_bs
-  I%boot_ops%taper_edge_jBS = bops%taper_edge_jBS
+  I%boot_ops%taper_edge_jbs = bops%taper_edge_jbs
   I%boot_ops%taper_edge_psi0 = bops%taper_edge_psi0
   I%boot_ops%taper_edge_shape = bops%taper_edge_shape
   I%boot_ops%saw_q_s = bops%saw_q_s
@@ -632,7 +636,7 @@ TYPE IS (jphi_bs_flux_func)
   I%boot_ops%saw_ramp = bops%saw_ramp
   I%boot_ops%saw_rule = bops%saw_rule
 CLASS DEFAULT
-  CALL oft_warn('Run set_profiles with a jphi-split-bootstrap profile before calling set_boot_ops.')
+  CALL copy_string('Run set_profiles with a jphi-split-bootstrap profile before calling set_boot_ops.',error_str)
 END SELECT
 END SUBROUTINE tokamaker_set_boot_ops
 !---------------------------------------------------------------------------------
@@ -646,17 +650,18 @@ TYPE(c_ptr), VALUE, INTENT(in) :: tMaker_equil_ptr !< Pointer to TokaMaker equil
 TYPE(tokamaker_boot_ops_type), INTENT(out) :: bops !< Bootstrap options read from object
 LOGICAL(c_bool), INTENT(out) :: initialized !< .TRUE. if boot_ops have been initialized
 CHARACTER(KIND=c_char), INTENT(out) :: error_str(OFT_ERROR_SLEN) !< Error string (empty if no error)
+CLASS(flux_func), POINTER :: I_base
 TYPE(gs_equil), POINTER :: tMaker_equil_obj
 IF(.NOT.tokamaker_equil_ccast(tMaker_equil_ptr,tMaker_equil_obj,error_str))RETURN
-SELECT TYPE(I => tMaker_equil_obj%I)
+I_base=>torflux_unwrap(tMaker_equil_obj%I)
+SELECT TYPE(I => I_base)
 TYPE IS (jphi_bs_flux_func)
   initialized = I%boot_ops%initialized
-  bops%isolate_edge_jBS = I%boot_ops%isolate_edge_jBS
-  bops%parameterize_jBS = I%boot_ops%parameterize_jBS
-  bops%scale_jBS = I%boot_ops%scale_jBS
-  bops%djBS_tol = I%boot_ops%djBS_tol
+  bops%isolate_edge_jbs = I%boot_ops%isolate_edge_jbs
+  bops%scale_jbs = I%boot_ops%scale_jbs
+  bops%djbs_tol = I%boot_ops%djbs_tol
   bops%diagnose_bs = I%boot_ops%diagnose_bs
-  bops%taper_edge_jBS = I%boot_ops%taper_edge_jBS
+  bops%taper_edge_jbs = I%boot_ops%taper_edge_jbs
   bops%taper_edge_psi0 = I%boot_ops%taper_edge_psi0
   bops%taper_edge_shape = I%boot_ops%taper_edge_shape
   bops%saw_q_s = I%boot_ops%saw_q_s
@@ -666,72 +671,62 @@ TYPE IS (jphi_bs_flux_func)
   bops%saw_ramp = I%boot_ops%saw_ramp
   bops%saw_rule = I%boot_ops%saw_rule
 CLASS DEFAULT
-  CALL oft_warn('tokamaker_get_boot_ops: ffp_prof is not of type jphi-split-bootstrap. ' // &
-    'Bootstrap options are not available.')
-  initialized = .FALSE.
+  initialized = .FALSE. ! Not a bootstrap profile: no options
 END SELECT
 END SUBROUTINE tokamaker_get_boot_ops
 !---------------------------------------------------------------------------------
-!> Get cached bootstrap current profiles from the last jphi_bs_update call.
+!> Get one current profile of the last jphi_bs_update (`boot_profs`, see `boot_prof_names`) by name.
 !!
-!! Returns C pointers directly into the Fortran-owned arrays.
-!! n is the size of the total_j_phi/psi_n/j_bs_final/j_ind_final/jphi_fixed/j_saw group (0 if not allocated).
-!! n_raw is the size of j_bs_raw and jdotb_bs_raw (0 if not allocated).  The two sizes may differ.
+!! Returns a C pointer into the Fortran-owned array, or n = 0 if it is not available (also when
+!! ffp_prof is not of type jphi-split-bootstrap).
 !---------------------------------------------------------------------------------
-SUBROUTINE tokamaker_get_boot_profs(tMaker_equil_ptr,n,psi_n_ptr,total_j_phi_ptr, &
-    j_bs_final_ptr,j_ind_final_ptr,jphi_fixed_ptr,j_saw_ptr,saw_rho_m,saw_rho_out,saw_n_dips,n_raw, &
-    j_bs_raw_ptr,jdotb_bs_raw_ptr,error_str) BIND(C,NAME="tokamaker_get_boot_profs")
+SUBROUTINE tokamaker_get_boot_prof(tMaker_equil_ptr,name,n,prof_ptr,error_str) BIND(C,NAME="tokamaker_get_boot_prof")
 TYPE(c_ptr), VALUE, INTENT(in) :: tMaker_equil_ptr !< Pointer to TokaMaker equilibrium object
-INTEGER(c_int), INTENT(out) :: n !< Size of total_j_phi, psi_n, j_bs_final, j_ind_final arrays (0 if not allocated)
-TYPE(c_ptr), INTENT(out) :: psi_n_ptr !< Pointer to psi_n array
-TYPE(c_ptr), INTENT(out) :: total_j_phi_ptr !< Pointer to total_j_phi array
-TYPE(c_ptr), INTENT(out) :: j_bs_final_ptr !< Pointer to j_bs_final array
-TYPE(c_ptr), INTENT(out) :: j_ind_final_ptr !< Pointer to j_ind_final array
-TYPE(c_ptr), INTENT(out) :: jphi_fixed_ptr !< Pointer to jphi_fixed array (c_null_ptr if not allocated)
-TYPE(c_ptr), INTENT(out) :: j_saw_ptr !< Pointer to j_saw array (c_null_ptr if not allocated)
+CHARACTER(KIND=c_char), INTENT(in) :: name(*) !< Profile name (null-terminated)
+INTEGER(c_int), INTENT(out) :: n !< Size of the profile (0 if not available)
+TYPE(c_ptr), INTENT(out) :: prof_ptr !< Pointer to the profile (c_null_ptr if not available)
+CHARACTER(KIND=c_char), INTENT(out) :: error_str(OFT_ERROR_SLEN) !< Error string (empty if no error)
+CHARACTER(LEN=32) :: name_f
+REAL(r8), POINTER :: vals(:)
+CLASS(flux_func), POINTER :: I_base
+TYPE(gs_equil), POINTER :: tMaker_equil_obj
+IF(.NOT.tokamaker_equil_ccast(tMaker_equil_ptr,tMaker_equil_obj,error_str))RETURN
+n = 0
+prof_ptr = c_null_ptr
+CALL copy_string_rev(name,name_f)
+I_base=>torflux_unwrap(tMaker_equil_obj%I)
+SELECT TYPE(I => I_base)
+TYPE IS (jphi_bs_flux_func)
+  CALL boot_prof_access(I%boot_profs,name_f,get=vals)
+  IF(ASSOCIATED(vals))THEN
+    n = SIZE(vals, KIND=c_int)
+    prof_ptr = c_loc(vals)
+  END IF
+END SELECT
+END SUBROUTINE tokamaker_get_boot_prof
+!---------------------------------------------------------------------------------
+!> Get the sawtooth scalars of the last jphi_bs_update (zero if none or not a bootstrap profile)
+!---------------------------------------------------------------------------------
+SUBROUTINE tokamaker_get_boot_saw(tMaker_equil_ptr,saw_rho_m,saw_rho_out,saw_n_dips,error_str) BIND(C,NAME="tokamaker_get_boot_saw")
+TYPE(c_ptr), VALUE, INTENT(in) :: tMaker_equil_ptr !< Pointer to TokaMaker equilibrium object
 REAL(c_double), INTENT(out) :: saw_rho_m !< Sawtooth radius at the last reset (0 = none)
 REAL(c_double), INTENT(out) :: saw_rho_out !< Outer end of the last reset (0 = none)
 INTEGER(c_int), INTENT(out) :: saw_n_dips !< Regions reset at the last reset
-INTEGER(c_int), INTENT(out) :: n_raw !< Size of j_bs_raw array (0 if not allocated)
-TYPE(c_ptr), INTENT(out) :: j_bs_raw_ptr !< Pointer to j_bs_raw array (c_null_ptr if not allocated)
-TYPE(c_ptr), INTENT(out) :: jdotb_bs_raw_ptr !< Pointer to jdotb_bs_raw array (c_null_ptr if not allocated)
 CHARACTER(KIND=c_char), INTENT(out) :: error_str(OFT_ERROR_SLEN) !< Error string (empty if no error)
+CLASS(flux_func), POINTER :: I_base
 TYPE(gs_equil), POINTER :: tMaker_equil_obj
 IF(.NOT.tokamaker_equil_ccast(tMaker_equil_ptr,tMaker_equil_obj,error_str))RETURN
-SELECT TYPE(I => tMaker_equil_obj%I)
+saw_rho_m = 0.d0
+saw_rho_out = 0.d0
+saw_n_dips = 0
+I_base=>torflux_unwrap(tMaker_equil_obj%I)
+SELECT TYPE(I => I_base)
 TYPE IS (jphi_bs_flux_func)
-  n = 0
-  n_raw = 0
-  psi_n_ptr = c_null_ptr
-  total_j_phi_ptr = c_null_ptr
-  j_bs_final_ptr = c_null_ptr
-  j_ind_final_ptr = c_null_ptr
-  jphi_fixed_ptr = c_null_ptr
-  j_saw_ptr = c_null_ptr
   saw_rho_m = I%boot_profs%saw_rho_m
   saw_rho_out = I%boot_profs%saw_rho_out
   saw_n_dips = I%boot_profs%saw_n_dips
-  j_bs_raw_ptr = c_null_ptr
-  jdotb_bs_raw_ptr = c_null_ptr
-  IF(ASSOCIATED(I%boot_profs%total_j_phi))THEN
-    n = SIZE(I%boot_profs%total_j_phi, KIND=c_int)
-    psi_n_ptr = c_loc(I%boot_profs%psi_n)
-    total_j_phi_ptr = c_loc(I%boot_profs%total_j_phi)
-    j_bs_final_ptr = c_loc(I%boot_profs%j_bs_final)
-    j_ind_final_ptr = c_loc(I%boot_profs%j_ind_final)
-    IF(ASSOCIATED(I%boot_profs%jphi_fixed))jphi_fixed_ptr = c_loc(I%boot_profs%jphi_fixed)
-    IF(ASSOCIATED(I%boot_profs%j_saw))j_saw_ptr = c_loc(I%boot_profs%j_saw)
-  END IF
-  IF(ASSOCIATED(I%boot_profs%j_bs_raw))THEN
-    n_raw = SIZE(I%boot_profs%j_bs_raw, KIND=c_int)
-    j_bs_raw_ptr = c_loc(I%boot_profs%j_bs_raw)
-    IF(ASSOCIATED(I%boot_profs%jdotb_bs_raw))jdotb_bs_raw_ptr = c_loc(I%boot_profs%jdotb_bs_raw)
-  END IF
-CLASS DEFAULT
-  CALL oft_warn('tokamaker_get_boot_profs: ffp_prof is not of type jphi-split-bootstrap. ' // &
-    'Bootstrap profiles are not available.')
 END SELECT
-END SUBROUTINE tokamaker_get_boot_profs
+END SUBROUTINE tokamaker_get_boot_saw
 !---------------------------------------------------------------------------------
 !> 1-D sawtooth q reset (@ref grad_shaf_bootstrap::saw_reset_1d) on given profiles, axis first.
 !! scal = [rho_s, rho_m, n_dips, w, rho_out]
@@ -1624,28 +1619,35 @@ INTEGER(i4) :: i
 REAL(r8) :: psihat,phihat
 TYPE(gs_equil), POINTER :: tMaker_equil_obj
 IF(.NOT.tokamaker_equil_ccast(tMaker_equil_ptr,tMaker_equil_obj,error_str))RETURN
-IF((.NOT.tMaker_equil_obj%tmap%active).OR.(tMaker_equil_obj%tmap%ns<2))THEN
-  CALL copy_string('No toroidal flux map (requires an equilibrium with toroidal-flux profiles)',error_str)
-  RETURN
+IF(ASSOCIATED(tMaker_equil_obj%torflux))THEN
+  SELECT TYPE(map=>tMaker_equil_obj%torflux)
+    CLASS IS(torflux_map)
+      IF(map%active.AND.(map%ns>=2))THEN
+        DO i=1,npts
+          IF(inverse)THEN
+            psihat=map%inv(xin(i))
+            CALL map%eval(psihat,phihat,jac(i))
+            xout(i)=psihat
+          ELSE
+            CALL map%eval(xin(i),phihat,jac(i))
+            xout(i)=phihat
+          END IF
+        END DO
+        RETURN
+      END IF
+  END SELECT
 END IF
-DO i=1,npts
-  IF(inverse)THEN
-    psihat=tMaker_equil_obj%tmap%inv(xin(i))
-    CALL tMaker_equil_obj%tmap%eval(psihat,phihat,jac(i))
-    xout(i)=psihat
-  ELSE
-    CALL tMaker_equil_obj%tmap%eval(xin(i),phihat,jac(i))
-    xout(i)=phihat
-  END IF
-END DO
+CALL copy_string('No toroidal flux map (requires an equilibrium with toroidal-flux profiles)',error_str)
 END SUBROUTINE tokamaker_torflux_map
 !---------------------------------------------------------------------------------
-!> Select toroidal flux map q/F backend and tracer tolerance (testing only)
+!> Select the flux-surface backend of the toroidal flux map, @ref oft_gs::gs_get_qprof,
+!! @ref oft_gs::gs_trace_surf and the ifile/gEQDSK writers, and the tracer tolerance (testing only)
 !---------------------------------------------------------------------------------
 SUBROUTINE tokamaker_torflux_backend(backend,tol) BIND(C,NAME="tokamaker_torflux_backend")
-INTEGER(c_int), VALUE, INTENT(in) :: backend !< 0 cut-cell (default), 1 tracer
+INTEGER(c_int), VALUE, INTENT(in) :: backend !< 0 cut-cell (default), 1 field-line tracer (deprecated)
 REAL(c_double), VALUE, INTENT(in) :: tol !< Tracer tolerance, <0 for default
 torflux_qgeom_backend=backend
+qprof_backend=backend
 qprof_trace_tol=tol
 END SUBROUTINE tokamaker_torflux_backend
 !---------------------------------------------------------------------------------
@@ -1693,7 +1695,7 @@ REAL(c_double), INTENT(in) :: psi_saut(npsi) !< \f$ \psi \f$ values to compute t
 REAL(c_double), INTENT(out) :: fc(npsi) !< Trapped particle fraction
 REAL(c_double), INTENT(out) :: r_avgs(npsi,3) !< Flux surface averaged radial coordinates \f$<R>\f$, \f$<1/R>\f$, \f$<a>\f$
 REAL(c_double), INTENT(out) :: modb_avgs(npsi,2) !< Flux surface averaged field strength \f$<|B|>\f$, \f$<|B|^2>\f$
-REAL(c_double), INTENT(out) :: eps(npsi) !< Local inverse aspect ratio \f$ \varepsilon = (R_{\max}-R_{\min})/(2\langle R \rangle) \f$
+REAL(c_double), INTENT(out) :: eps(npsi) !< Local inverse aspect ratio \f$ \varepsilon = (R_{\max}-R_{\min})/(R_{\max}+R_{\min}) \f$
 CHARACTER(KIND=c_char), INTENT(out) :: error_str(OFT_ERROR_SLEN) !< Error string (empty if no error)
 TYPE(gs_equil), POINTER :: tMaker_equil_obj
 IF(.NOT.tokamaker_equil_ccast(tMaker_equil_ptr,tMaker_equil_obj,error_str))RETURN
@@ -2330,7 +2332,8 @@ END SUBROUTINE tokamaker_save_eqdsk
 !------------------------------------------------------------------------------
 !> Save current equilibrium to iFile format
 !------------------------------------------------------------------------------
-SUBROUTINE tokamaker_save_ifile(tMaker_equil_ptr,filename,npsi,ntheta,psi_pad,lcfs_press,pack_lcfs,single_prec,error_str) BIND(C,NAME="tokamaker_save_ifile")
+SUBROUTINE tokamaker_save_ifile(tMaker_equil_ptr,filename,npsi,ntheta,psi_pad,lcfs_press,pack_lcfs,single_prec,profile_derivs, &
+  psi_bounds,error_str) BIND(C,NAME="tokamaker_save_ifile")
 TYPE(c_ptr), VALUE, INTENT(in) :: tMaker_equil_ptr !< TokaMaker equilibrium instance
 CHARACTER(KIND=c_char), INTENT(in) :: filename(OFT_PATH_SLEN) !< Filename to save equilibrium to
 INTEGER(c_int), VALUE, INTENT(in) :: npsi !< Number of radial sampling points
@@ -2339,6 +2342,8 @@ REAL(c_double), VALUE, INTENT(in) :: psi_pad !< Padding in normalized flux at LC
 REAL(c_double), VALUE, INTENT(in) :: lcfs_press !< Plasma pressure on the LCFS (zero by default)
 LOGICAL(c_bool), VALUE, INTENT(in) :: pack_lcfs !< Pack toward LCFS with quadraturic sampling?
 LOGICAL(c_bool), VALUE, INTENT(in) :: single_prec !< Save single precision file? (default: double precision)
+LOGICAL(c_bool), VALUE, INTENT(in) :: profile_derivs !< Append F*F' and P' records?
+LOGICAL(c_bool), VALUE, INTENT(in) :: psi_bounds !< Append the unpadded [psi_axis, psi_LCFS] record?
 CHARACTER(KIND=c_char), INTENT(out) :: error_str(OFT_ERROR_SLEN) !< Error string (empty if no error)
 CHARACTER(LEN=OFT_PATH_SLEN) :: filename_tmp
 CHARACTER(LEN=OFT_ERROR_SLEN) :: error_flag
@@ -2346,7 +2351,8 @@ TYPE(gs_equil), POINTER :: tMaker_equil_obj
 IF(.NOT.tokamaker_equil_ccast(tMaker_equil_ptr,tMaker_equil_obj,error_str))RETURN
 CALL copy_string_rev(filename,filename_tmp)
 CALL gs_save_ifile(tMaker_equil_obj,filename_tmp,npsi,ntheta,psi_pad,lcfs_press=lcfs_press, &
-  pack_lcfs=LOGICAL(pack_lcfs),single_prec=LOGICAL(single_prec),error_str=error_flag)
+  pack_lcfs=LOGICAL(pack_lcfs),single_prec=LOGICAL(single_prec),profile_derivs=LOGICAL(profile_derivs), &
+  psi_bounds=LOGICAL(psi_bounds),error_str=error_flag)
 CALL copy_string(TRIM(error_flag),error_str)
 END SUBROUTINE tokamaker_save_ifile
 !------------------------------------------------------------------------------
