@@ -14,149 +14,6 @@ from warnings import warn
 from ._interface import *
 from OpenFUSIONToolkit.TokaMaker.util import get_jphi_from_GS
 
-def parameterize_edge_jbs(psi, amp, center, width, offset, sk, y_sep=0.0, blend_width=0.03, tail_alpha=1.5):
-    r'''! Generate parameterized edge bootstrap current profile with tunable concave fall-off
-
-    @param psi Normalized poloidal flux profile \f$\hat{\psi}\f$
-    @param amp Amplitude of edge skewed Gaussian spike
-    @param center Center location of edge skewed Gaussian spike
-    @param width Width of edge skewed Gaussian spike
-    @param offset Height of core flat profile
-    @param sk Skewness parameter of Gaussian
-    @param y_sep Value at separatrix (\f$\hat{\psi}=1\f$) for profile
-    @param blend_width Blending width for smooth transition in \f$\hat{\psi}\f$
-    @param tail_alpha Controls right-side fall-off shape (1.0 = cosine, >1.0 = concave)
-    @result Parameterized bootstrap current profile as array over \f$\hat{\psi}\f$
-    '''
-    from scipy.optimize import root_scalar
-    from scipy.stats import skewnorm
-
-    def generate_baseline_prof(psi, amp, center, width, offset, sk, y_sep, blend_width, tail_alpha):
-        # --- 1. Find Exact Peak of Underlying Skew Gaussian ---
-        def raw_shape(x):
-            return skewnorm.pdf(x, sk, loc=center, scale=width)
-
-        # Fine grid scan for precision
-        x_grid = numpy.linspace(max(0, center - 3*width), min(1, center + 3*width), 10000)
-        y_grid = raw_shape(x_grid)
-        idx_peak = numpy.argmax(y_grid)
-        val_peak_raw = y_grid[idx_peak]
-        x_peak = x_grid[idx_peak]
-
-        # --- 2. Calculate Internal Amplitude & Left Side ---
-
-        # Smoothing factor for the blend
-        k_smooth = (amp / width) * (blend_width / 4.0)
-        if k_smooth < 1e-5:
-            k_smooth = 1e-5
-
-        # Case A: Standard Spike (Amp > Offset)
-        if amp > offset:
-            # Solve for internal_amp to compensate for SoftMax boost
-            diff = amp - offset
-            if diff > 1e-10:
-                argument = 1.0 - numpy.exp((offset - amp) / k_smooth)
-                if argument <= 0:
-                    argument = 1e-16
-                internal_amp = amp + k_smooth * numpy.log(argument)
-            else:
-                internal_amp = amp
-
-            spike_profile = raw_shape(psi) / val_peak_raw * internal_amp
-            profile_left = k_smooth * numpy.logaddexp(offset / k_smooth, spike_profile / k_smooth)
-            stitch_height = amp
-
-        # Case B: Dominant Offset
-        else:
-            profile_left = numpy.full_like(psi, offset)
-            stitch_height = offset
-
-        # --- 3. Construct Right Side (Powered Cosine) ---
-        # Model: y = stitch_height * cos(omega * (x - x_peak)) ^ tail_alpha
-
-        dist_to_edge = 1.0 - x_peak
-        if dist_to_edge < 1e-5:
-            dist_to_edge = 1e-5
-
-        # Determine omega to hit y_sep exactly
-        # y_sep = H * cos(w * L)^alpha  =>  (y_sep/H)^(1/alpha) = cos(w * L)
-
-        # Safety: Base for power must be positive
-        # If y_sep > stitch_height, we use Cosh instead of Cos
-
-        if y_sep < stitch_height:
-            # Cosine Decay
-            # Calculate target cosine value (inverse power)
-            target_cos = (y_sep / stitch_height) ** (1.0 / tail_alpha)
-            # Clip to valid domain for arccos [-1, 1]
-            target_cos = numpy.clip(target_cos, -1.0, 1.0)
-
-            omega = numpy.arccos(target_cos) / dist_to_edge
-
-            # Calculate profile
-            # We must protect the cosine argument so it doesn't go negative before power
-            # (though strictly defined, it stays in [0, pi/2] for this range)
-            arg = omega * (psi - x_peak)
-            base_cos = numpy.cos(arg)
-            # Ensure positive base for float power
-            base_cos = numpy.maximum(base_cos, 0)
-
-            profile_right = stitch_height * (base_cos ** tail_alpha)
-
-        else:
-            # Cosh Rise (Rare)
-            target_cosh = (y_sep / stitch_height) ** (1.0 / tail_alpha)
-            omega = numpy.arccosh(target_cosh) / dist_to_edge
-            profile_right = stitch_height * (numpy.cosh(omega * (psi - x_peak)) ** tail_alpha)
-
-        # --- 4. Stitching ---
-        temp_profile = numpy.where(psi <= x_peak, profile_left, profile_right)
-
-        if y_sep >= 0:
-            temp_profile = numpy.maximum(temp_profile, 0)
-        return temp_profile
-
-    def objective_function(alpha, psi, amp, center, width, offset, sk, y_sep, blend_width, tail_alpha):
-        r'''! Compute difference between integrated profile and \f$I_p^{target}\f$
-
-        @param alpha Scaling factor to solve for
-        @param psi Normalized poloidal flux profile \f$\hat{\psi}\f$
-        @param amp Amplitude of edge spike
-        @param center Center of edge spike
-        @param width Width of edge spike
-        @param offset Core offset
-        @param sk Skewness parameter
-        @param y_sep Value at separatrix
-        @param blend_width Blending width
-        @param tail_alpha Right-side fall-off shape
-        @result Difference between computed and target offset
-        '''
-        temp_profile = generate_baseline_prof(psi, amp, center, width, alpha*offset, sk, y_sep, blend_width, tail_alpha)
-        return temp_profile[0] - offset
-
-    if offset == 0.0:
-        final_profile = generate_baseline_prof(psi, amp, center, width, -1e10, sk, y_sep, blend_width, tail_alpha)
-    else:
-        # Find scalar "alpha" that solves
-        result = root_scalar(objective_function,
-                                args=(psi, amp, center, width, offset, sk, y_sep, blend_width, tail_alpha),
-                                bracket=[-1e+10, 10*amp],
-                                method='brentq',
-                                rtol=1e-6)
-
-        # Extract the solution
-        a_optimal = result.root
-
-        final_profile = generate_baseline_prof(psi, amp, center, width, a_optimal*offset, sk, y_sep, blend_width, tail_alpha)
-
-    # find correct offset to match user input value
-    return final_profile
-
-def parameterize_edge_jBS(*args, **kwargs):
-    r'''! Deprecated alias of @ref parameterize_edge_jbs'''
-    warn("parameterize_edge_jBS is deprecated, use parameterize_edge_jbs", DeprecationWarning, stacklevel=2)
-    return parameterize_edge_jbs(*args, **kwargs)
-
 def Hmode_profiles(edge=0.08, ped=0.4, core=2.5, rgrid=201, expin=1.5, expout=1.5, widthp=0.04, xphalf=None):
     r'''! This function generates H-mode density and temperature profiles evenly
     spaced in your favorite radial coordinate. Copied from https://omfit.io/_modules/omfit_classes/utils_fusion.html
@@ -201,11 +58,10 @@ def analyze_bootstrap_edge_spike(psi_N, jphi_bs, diagnostic_plots=False):
     @param psi_N Normalized poloidal flux profile \f$\hat{\psi}\f$
     @param jphi_bs Bootstrap current profile \f$j_{\phi,BS}(\hat{\psi})\f$ [A/m^2]
     @param diagnostic_plots If True, plot diagnostic figures
-    @result Dictionary with spike properties and parameterized spike model
+    @result Dictionary with the isolated spike profile, `'masked_spike'`
     '''
 
     from scipy.signal import find_peaks, peak_widths
-    from scipy.optimize import curve_fit
     import matplotlib.pyplot as plt
 
     # Focus on the edge region (psi_N > 0.7)
@@ -221,13 +77,7 @@ def analyze_bootstrap_edge_spike(psi_N, jphi_bs, diagnostic_plots=False):
         warn(reason + "; using bootstrap profile without edge isolation",
              RuntimeWarning, stacklevel=2)
         j_full = numpy.array(jphi_bs, dtype=float)
-        return {
-            'sigma': 0.0,
-            'background': 0.0,
-            'gaussian_params': None,
-            'parameterized_spike': j_full,
-            'masked_spike': j_full.copy(),
-        }
+        return {'masked_spike': j_full}
 
     # Guard an empty edge slice (psi_N may not reach the edge region)
     if j_edge.size == 0:
@@ -322,60 +172,9 @@ def analyze_bootstrap_edge_spike(psi_N, jphi_bs, diagnostic_plots=False):
     # Apply the patch to the main masked jphi_bs profile
     masked_spike[idx_start : idx_end + 1] = y_patch
 
-    # Attempt to fit bootstrap parameterization to calculated profile (deprecated)
-    # Initial parameter guess
-    sigma_init = fwhm/2.355  # Convert FWHM to sigma
-    p0 = [peak_height, peak_psi, sigma_init, lmin_jbs, 1.0,
-          max(0.0, jphi_bs[-1]), 0.05]
-
-    # Guard against degenerate bounds when peak_height, lmin_jbs,
-    # or jphi_bs[-1] are near zero or negative (common for low-
-    # pedestal L-mode-like profiles in an LH transition scan).
-    _eps = max(1e-6, 1e-3 * abs(peak_height)) if peak_height != 0 else 1e-6
-    amp_lo = min(0.99 * peak_height, peak_height - _eps)
-    amp_hi = max(1.01 * peak_height, peak_height + _eps)
-
-    _eps_off = max(1e-6, 1e-3 * abs(lmin_jbs)) if lmin_jbs != 0 else 1e-6
-    off_lo = min(0.99 * lmin_jbs, lmin_jbs - _eps_off)
-    off_hi = max(1.01 * lmin_jbs, lmin_jbs + _eps_off)
-
-    ysep_hi = max(2 * abs(jphi_bs[-1]), abs(jphi_bs[-1]) + 1e-6, 1e-6)
-
-    lower_bounds = [amp_lo,
-                    0.8*peak_psi,
-                    0.0,       # width
-                    off_lo,
-                    -50,       # sk
-                    0.0,       # y_sep
-                    0.001]     # blend_width
-    upper_bounds = [amp_hi,
-                    1.2*peak_psi,
-                    0.33,
-                    off_hi,
-                    50,        # sk
-                    ysep_hi,
-                    0.2]
-
-    # The parameterized fit is only used when parameterize_jbs=True; its internal
-    # root_scalar can fail to bracket on some equilibria, so keep it non-fatal.
-    try:
-        popt, pcov = curve_fit(parameterize_edge_jbs, psi_N[fit_mask], jphi_bs[fit_mask], p0=p0,
-                                bounds=(lower_bounds, upper_bounds),
-                                maxfev=10000)
-        amp, center, width, offset, sk, y_sep, blend_width = popt
-        spike_only = parameterize_edge_jbs(psi_N, amp, center, width, offset, sk, y_sep, blend_width)
-    except Exception as _edge_fit_exc:
-        warn("parameterize_edge_jbs fit failed (%s); falling back to "
-             "masked_spike (unused unless parameterize_jbs=True)" % _edge_fit_exc,
-             RuntimeWarning, stacklevel=2)
-        popt = numpy.asarray(p0, dtype=float)
-        amp, center, width, offset, sk, y_sep, blend_width = popt
-        spike_only = masked_spike.copy()
-
     if diagnostic_plots:
         plt.figure()
         plt.plot(psi_N[fit_mask],jphi_bs[fit_mask]/1e6,label='Input jphi_bs')
-        plt.plot(psi_N,spike_only/1e6,label='Fitted parameterization')
         plt.plot(psi_N,masked_spike/1e6,label='Isolated')
         plt.xlabel(r'$\hat \psi$')
         plt.ylabel(r'$j_\phi$ [MA/m$^2$]')
@@ -383,15 +182,7 @@ def analyze_bootstrap_edge_spike(psi_N, jphi_bs, diagnostic_plots=False):
         plt.legend(loc='best')
         plt.show()
 
-    results = {
-        'sigma': width,                 # Gaussian width (sigma)
-        'background': offset,           # background level
-        'gaussian_params': popt,        # Raw parameters [amp, center, width, offset]
-        'parameterized_spike': spike_only,    # Array of spike component values
-        'masked_spike': masked_spike
-    }
-
-    return results
+    return {'masked_spike': masked_spike}
 
 def _extrap_jbs_boundaries(psi_N, jphi_bs):
     r'''! Linearly extrapolate jphi_bs to the axis/LCFS endpoints where q is
@@ -864,8 +655,9 @@ def _default_profile(values, name, x=None, scale=1.0):
 
 ## Deprecated solve_with_bootstrap kwargs (old name -> (new name, default))
 _RENAMED_KWARGS = {'scale_jBS': ('scale_jbs', 1.0),
-                   'isolate_edge_jBS': ('isolate_edge_jbs', False),
-                   'parameterize_jBS': ('parameterize_jbs', False)}
+                   'isolate_edge_jBS': ('isolate_edge_jbs', False)}
+## Removed solve_with_bootstrap kwargs (accepted only at their old default)
+_REMOVED_KWARGS = {'parameterize_jBS': False, 'parameterize_jbs': False}
 
 def _pop_renamed_kwargs(kwargs, values):
     r'''! Move deprecated names in `kwargs` to `values` (new name -> value), with a DeprecationWarning
@@ -874,6 +666,10 @@ def _pop_renamed_kwargs(kwargs, values):
     @param values Values of the new names
     @result Updated `values`
     '''
+    for old, default in _REMOVED_KWARGS.items():
+        if kwargs.pop(old, default) != default:
+            raise ValueError("solve_with_bootstrap: '{0}' (the skew-normal edge-spike fit) was removed; "
+                             "use isolate_edge_jbs".format(old))
     for old, (new, default) in _RENAMED_KWARGS.items():
         if old not in kwargs:
             continue
@@ -922,7 +718,6 @@ def solve_with_bootstrap(mygs,
                          psi_pad=1e-3,
                          iterations=3,
                          diagnostic_plots=False,
-                         parameterize_jbs = False,
                          use_OMFIT_sauter = False,
                          verbose = True,
                          x = None,
@@ -952,7 +747,6 @@ def solve_with_bootstrap(mygs,
     @param psi_pad Padding for flux surface calculations
     @param iterations Number of solver iterations
     @param diagnostic_plots If True, plot diagnostic figures
-    @param parameterize_jbs If True, use parameterized edge spike; Python solver only (was `parameterize_jBS`, deprecated)
     @param use_OMFIT_sauter If True, use OMFIT Sauter model
     @param x Normalized radial grid the profiles are sampled on, in `coord` (strictly increasing,
     in [0,1]); if `None`, profiles are assumed evenly sampled on [0,1]
@@ -962,8 +756,7 @@ def solve_with_bootstrap(mygs,
     @param use_sauter_eps If True (default), use the geometric inverse aspect ratio
       \f$\varepsilon = (R_{\max}-R_{\min})/(R_{\max}+R_{\min})\f$ of each surface (`TokaMaker.sauter_fc`).
       If False, use the formula \f$\varepsilon = \langle a\rangle / \langle R\rangle\f$.
-    @param diagnose_bs If True, print the 7 edge-spike fit parameters and the
-      parameterized spike profile table to stdout (mirroring the Fortran --diagnose-bs output).
+    @param diagnose_bs If True, print the bootstrap diagnostics each nonlinear iteration (internal Fortran solver only)
     @param jphi_fixed Fixed toroidal current density \f$j_{fixed}\f$ [A/m$^2$] on `x` (array or profile dict),
       added to the total without rescaling (internal Fortran solver only)
     @param F0 Vacuum \f$F(\psi)\f$ value (B0*R0), passed to the solver (default: keep the current value)
@@ -986,9 +779,8 @@ def solve_with_bootstrap(mygs,
              "coordinate as coord= ('psi_n' or 'phi_n')", DeprecationWarning, stacklevel=2)
         x = psi_N
 
-    _opts = _pop_renamed_kwargs(kwargs, {'scale_jbs': scale_jbs, 'isolate_edge_jbs': isolate_edge_jbs,
-                                         'parameterize_jbs': parameterize_jbs})
-    scale_jbs, isolate_edge_jbs, parameterize_jbs = _opts['scale_jbs'], _opts['isolate_edge_jbs'], _opts['parameterize_jbs']
+    _opts = _pop_renamed_kwargs(kwargs, {'scale_jbs': scale_jbs, 'isolate_edge_jbs': isolate_edge_jbs})
+    scale_jbs, isolate_edge_jbs = _opts['scale_jbs'], _opts['isolate_edge_jbs']
 
     if not use_python_solve:
         _python_only = {
@@ -1008,8 +800,6 @@ def solve_with_bootstrap(mygs,
             )
         if inductive_jphi is None:
             raise ValueError("inductive_jphi must be provided for method='internal'")
-        if parameterize_jbs:
-            raise ValueError("parameterize_jbs is not supported by the internal solver (use_python_solve=True)")
         _ne   = ne if isinstance(ne, dict) else _default_profile(ne, 'ne', x=x)
         _Te   = Te if isinstance(Te, dict) else _default_profile(Te, 'Te', x=x, scale=1e-3)
         _ni   = ni if isinstance(ni, dict) else _default_profile(ni, 'ni', x=x)
@@ -1208,23 +998,8 @@ def solve_with_bootstrap(mygs,
 
         if include_jbs:
             if isolate_edge_jbs:
-                if parameterize_jbs:
-                    res = analyze_bootstrap_edge_spike(psi_N, jphi_bs_raw, diagnostic_plots=diagnostic_plots)
-                    jphi_bs = res['parameterized_spike'] * scale_jbs
-                    if diagnose_bs:
-                        popt = res['gaussian_params']
-                        amp, center, width, offset, sk, y_sep, bw = popt
-                        print(f'  [edge_spike_fit_ext]'
-                              f' amp={amp:.6E} center={center:.6E} width={width:.6E}'
-                              f' offset={offset:.6E} sk={sk:.6E} y_sep={y_sep:.6E}'
-                              f' bw={bw:.6E}')
-                        print('  [edge_spike_profile_ext] i  psi_N(std)    jphi_bs_raw[A/m2]  j_spike_masked[A/m2]  parameterized_spike[A/m2]')
-                        for _i, (_p, _r, _m, _v) in enumerate(
-                                zip(psi_N, jphi_bs_raw, res['masked_spike'], res['parameterized_spike']), 1):
-                            print(f'   {_i:4d}   {_p:.5E}   {_r:.5E}   {_m:.5E}   {_v:.5E}')
-                else:
-                    res = analyze_bootstrap_edge_spike(psi_N, jphi_bs_raw)
-                    jphi_bs = res['masked_spike'] * scale_jbs
+                res = analyze_bootstrap_edge_spike(psi_N, jphi_bs_raw)
+                jphi_bs = res['masked_spike'] * scale_jbs
             else:
                 jphi_bs = jphi_bs_raw * scale_jbs
 

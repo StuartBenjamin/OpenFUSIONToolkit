@@ -2458,6 +2458,9 @@ def test_bootstrap_deprecated_names(use_python_solve):
     with pytest.raises(TypeError, match="scale_jBS"):
         solve_with_bootstrap(None, ne, Te, ne.copy(), Te.copy(), 1.7, 1.0e6, inductive_jphi=np.ones(n),
                              scale_jbs=2.0, scale_jBS=2.0, use_python_solve=use_python_solve)
+    with pytest.raises(ValueError, match="removed"):
+        solve_with_bootstrap(None, ne, Te, ne.copy(), Te.copy(), 1.7, 1.0e6, inductive_jphi=np.ones(n),
+                             parameterize_jBS=True, use_python_solve=use_python_solve)
     results = _BootstrapResults({'jphi_total': 1})
     with pytest.warns(DeprecationWarning, match="total_j_phi"):
         assert results['total_j_phi'] == 1
