@@ -772,6 +772,7 @@ active_tracer%maxsteps=8e4
 active_tracer%raxis=raxis
 active_tracer%zaxis=zaxis
 active_tracer%inv=.TRUE.
+active_tracer%rtol=-1.d2 ! Avoid relative tolerance from controling step size at start of tracing
 do j=1,nr
   psi_surf=psi_q(j)*(x2-x1) + x1
   !--- Axis guard: flux surface degenerates at psi_N=1; prescribe analytically.
