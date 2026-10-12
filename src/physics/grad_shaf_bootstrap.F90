@@ -1421,6 +1421,7 @@ IF(qprof_trace_tol>0.d0)active_tracer%maxsteps=2e6
 active_tracer%raxis=raxis
 active_tracer%zaxis=zaxis
 active_tracer%inv=.TRUE.
+active_tracer%rtol=-1.d2 ! Avoid relative tolerance from controling step size at start of tracing
 ALLOCATE(ptout(3,active_tracer%maxsteps+1),vout(3,active_tracer%maxsteps))
 !$omp do schedule(dynamic,1)
 do j=1,nr
