@@ -12,7 +12,7 @@
 import numpy
 from warnings import warn
 from ._interface import *
-from OpenFUSIONToolkit.TokaMaker.util import get_jphi_from_GS
+from OpenFUSIONToolkit.TokaMaker.util import get_jphi_from_GS, get_jtor_imas
 
 def parameterize_edge_jbs(psi, amp, center, width, offset, sk, y_sep=0.0, blend_width=0.03, tail_alpha=1.5):
     r'''! Generate parameterized edge bootstrap current profile with tunable concave fall-off
@@ -1077,8 +1077,7 @@ def solve_with_bootstrap(mygs,
     def current_scaling_objective(alpha, jphi_ind, jphi_bs_final, psi_N, target_ip, geom):
         '''Objective function to match total Ip: exact I_p of TokaMaker jphi (eqs. A5, A9c).'''
         jphi_total = (alpha * jphi_ind) + jphi_bs_final
-        R, inv_R, inv_R2, pp = geom
-        j_imas = (pp + inv_R2 * (jphi_total - R * pp) / inv_R) / inv_R
+        j_imas = get_jtor_imas(jphi_total, *geom)
         ip_computed = mygs.compute_flux_integral(psi_N, j_imas)
         return ip_computed - target_ip
 
@@ -1212,7 +1211,7 @@ def solve_with_bootstrap(mygs,
         try:
             sol = root_scalar(current_scaling_objective,
                                 args=(current_jphi_target, jphi_bs_final, psi_N, Ip_target,
-                                      (R_avg, ravgs_q['<1/R>'], ravgs_q['<1/R^2>'], pp_eq)),
+                                      (pp_eq, R_avg, ravgs_q['<1/R>'], ravgs_q['<1/R^2>'])),
                                 bracket=[1.0, 10. * Ip_target],
                                 method='brentq', rtol=1e-6)
             alpha_opt = sol.root
