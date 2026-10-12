@@ -12,7 +12,7 @@
 import numpy
 from warnings import warn
 from ._interface import *
-from OpenFUSIONToolkit.TokaMaker.util import get_jphi_from_GS, get_jtor_imas
+from OpenFUSIONToolkit.TokaMaker.util import get_jphi_from_GS, get_dIdA_from_jphi
 
 def parameterize_edge_jbs(psi, amp, center, width, offset, sk, y_sep=0.0, blend_width=0.03, tail_alpha=1.5):
     r'''! Generate parameterized edge bootstrap current profile with tunable concave fall-off
@@ -1077,8 +1077,8 @@ def solve_with_bootstrap(mygs,
     def current_scaling_objective(alpha, jphi_ind, jphi_bs_final, psi_N, target_ip, geom):
         '''Objective function to match total Ip: exact I_p of TokaMaker jphi (eqs. A5, A9c).'''
         jphi_total = (alpha * jphi_ind) + jphi_bs_final
-        j_imas = get_jtor_imas(jphi_total, *geom)
-        ip_computed = mygs.compute_flux_integral(psi_N, j_imas)
+        didA = get_dIdA_from_jphi(jphi_total, *geom)
+        ip_computed = mygs.compute_flux_integral(psi_N, didA)
         return ip_computed - target_ip
 
     def calculate_profiles_and_bootstrap(include_jbs):

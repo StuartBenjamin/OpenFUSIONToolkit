@@ -552,20 +552,20 @@ def get_jphi_from_GS(ffprime, pprime, R_avg, one_over_R_avg):
     return ffprime * (one_over_R_avg / mu0) + R_avg * pprime
 
 
-def get_jtor_imas(jphi, pprime, R_avg, one_over_R_avg, one_over_R2_avg):
-    r'''! Convert TokaMaker \f$ j_\phi = \langle j_\phi \rangle \f$ to the IMAS-convention current density
-    \f$ \langle j_\phi/R \rangle / \langle 1/R \rangle \f$ (doc_tokamaker_current_conventions, A5)
+def get_dIdA_from_jphi(jphi, pprime, R_avg, one_over_R_avg, one_over_R2_avg):
+    r'''! Toroidal current per unit plasma cross-section area, \f$ dI/dA = \langle j_\phi/R \rangle / \langle 1/R \rangle \f$,
+    from TokaMaker \f$ j_\phi = \langle j_\phi \rangle \f$ (doc_tokamaker_current_conventions, A5)
 
-    Its area integral (`compute_flux_integral`) is the exact toroidal current (A9c); integrating
+    Its area integral (`compute_flux_integral`) is the exact toroidal current (A9c); the integral of
     \f$ j_\phi \f$ itself is not. For one current component, pass its own `pprime` (zero if it carries
-    no pressure-driven part), so the components sum to the total.
+    no pressure-driven part), so the components sum to the total. (This is also IMAS's toroidal current density.)
 
     @param jphi \f$ j_\phi(\psi_N) \f$ profile
     @param pprime P'(psi_N) profile, in the units of `get_profiles`
     @param R_avg <R>(psi_N) profile
     @param one_over_R_avg <1/R>(psi_N) profile
     @param one_over_R2_avg <1/R^2>(psi_N) profile
-    @result IMAS-convention current density on the same grid
+    @result \f$ dI/dA \f$ on the same grid
     '''
     return (pprime + one_over_R2_avg * (jphi - R_avg * pprime) / one_over_R_avg) / one_over_R_avg
 
