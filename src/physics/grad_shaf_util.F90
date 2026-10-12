@@ -961,6 +961,7 @@ active_tracer%maxsteps=8e4
 active_tracer%raxis=raxis
 active_tracer%zaxis=zaxis
 active_tracer%inv=.TRUE.
+active_tracer%rtol=-1.d2 ! Avoid relative tolerance from controling step size at start of tracing
 ALLOCATE(ptout(3,active_tracer%maxsteps+1))
 !$omp do schedule(dynamic,1)
 do j=2,npsi
@@ -1208,6 +1209,7 @@ active_tracer%maxsteps=8e4
 active_tracer%raxis=raxis
 active_tracer%zaxis=zaxis
 active_tracer%inv=.TRUE.
+active_tracer%rtol=-1.d2 ! Avoid relative tolerance from controling step size at start of tracing
 !$omp do schedule(dynamic,1)
 do j=1,nr
   IF(PRESENT(error_str))THEN
