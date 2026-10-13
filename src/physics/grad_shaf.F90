@@ -47,10 +47,10 @@ USE tracing_2d, ONLY: active_tracer, tracinginv_fs, set_tracer, cylinv_interp
 IMPLICIT NONE
 #include "local.h"
 INTEGER(4), PARAMETER :: max_xpoints = 20
-REAL(r8) :: qprof_trace_tol = -1.d0 !< Tracer tolerance override for @ref gs_get_qprof, <0 for default (testing only)
+REAL(8) :: qprof_trace_tol = -1.d0 !< Tracer tolerance override for @ref gs_get_qprof, <0 for default (testing only)
 !> Surface backend of @ref gs_get_qprof, @ref gs_trace_surf, `gs_save_ifile`, `gs_save_eqdsk`:
 !! 0 cut-cell where supported, 1 field-line tracer (deprecated)
-INTEGER(i4) :: qprof_backend = 0
+INTEGER(4) :: qprof_backend = 0
 !------------------------------------------------------------------------------
 !> Interpolation class for uniform source with simple tokamak representation
 !------------------------------------------------------------------------------
@@ -1778,7 +1778,7 @@ logical :: curved
 type(oft_lag_brinterp), target :: psi_eval,bcross_kappa_fun
 type(oft_lag_bginterp), target :: psi_geval
 type(gs_factory), pointer :: device
-TYPE(oft_quad_type), POINTER :: quad
+type(oft_quad_type), pointer :: quad
 ! t1=omp_get_wtime()
 !---
 device=>self%device
@@ -1807,9 +1807,9 @@ DO j=1,device%fe_rep%mesh%nc
   call device%fe_rep%ncdofs(j,j_lag)
   curved=cell_is_curved(device%fe_rep%mesh,j)
   CALL gs_cell_quad(self,j,psi_eval%vals,quad)
-  DO m=1,quad%np
-    IF(curved.OR.(m==1))CALL device%fe_rep%mesh%jacobian(j,quad%pts(:,m),goptmp,v)
-    CALL psi_eval%interp(j,quad%pts(:,m),goptmp,psitmp)
+  do m=1,quad%np
+    if(curved.OR.(m==1))call device%fe_rep%mesh%jacobian(j,quad%pts(:,m),goptmp,v)
+    call psi_eval%interp(j,quad%pts(:,m),goptmp,psitmp)
     pt=device%fe_rep%mesh%log2phys(j,quad%pts(:,m))
     !---Compute Magnetic Field
     IF(gs_test_bounds(self,pt).AND.psitmp(1)>self%plasma_bounds(1))THEN
@@ -2192,8 +2192,8 @@ REAL(8) :: nl_res,psimax,ffp_scale_in,ffp_scale_prev,itor,pnorm0,pnormp,itor_ffp
 REAL(8) :: R0_tmp,R0_hist(2),gpsi0(3),gpsi1(3),gpsi2(3),t0,t1
 REAL(8) :: param_mat(3,3),mat_save(2,2),param_vec(3),param_rhs(3)
 REAL(r8), POINTER :: saddle_save(:,:)
-INTEGER(i4) :: i,ii,j,k,error_flag,cell,ierr_loc,map_fails
-INTEGER(i4), PARAMETER :: map_fail_max = 3 !< Consecutive toroidal flux map failures before the solve fails
+integer(4) :: i,ii,j,k,error_flag,cell,ierr_loc,map_fails
+integer(4), parameter :: map_fail_max = 3 !< Consecutive toroidal flux map failures before the solve fails
 integer(4), save :: eq_count = 0
 CHARACTER(LEN=40) :: err_reason
 logical :: pm_save,fail_test
@@ -3433,7 +3433,7 @@ integer(4), allocatable :: j_lag(:)
 logical :: curved
 type(oft_lag_brinterp) :: bcross_kappa_fun
 type(gs_factory), pointer :: device
-TYPE(oft_quad_type), POINTER :: quad
+type(oft_quad_type), pointer :: quad
 t1=omp_get_wtime()
 !---
 NULLIFY(atmp,btmp,b2tmp,b3tmp)
@@ -3474,8 +3474,8 @@ do j=1,device%fe_rep%mesh%nc
   END DO
   curved=cell_is_curved(device%fe_rep%mesh,j)
   CALL gs_cell_quad(self,j,atmp,quad)
-  DO m=1,quad%np
-    IF(curved.OR.(m==1))CALL device%fe_rep%mesh%jacobian(j,quad%pts(:,m),goptmp,v)
+  do m=1,quad%np
+    if(curved.OR.(m==1))call device%fe_rep%mesh%jacobian(j,quad%pts(:,m),goptmp,v)
     det=v*quad%wts(m)
     DO l=1,device%fe_rep%nce
       CALL oft_blag_eval(device%fe_rep,j,l,quad%pts(:,m),rop(l))
@@ -3665,7 +3665,7 @@ real(8) :: itor_loc,goptmp(3,3),v,psitmp(1),bcross_kappa(1),H,ani_fac,pani(2)
 real(8) :: pt(3),curr_cent(2)
 integer(4) :: i,m
 type(gs_factory), pointer :: device
-TYPE(oft_quad_type), POINTER :: quad
+type(oft_quad_type), pointer :: quad
 IF(.NOT.self%has_plasma)THEN
   IF(PRESENT(centroid))centroid = 0.d0
   itor=0.d0
@@ -3689,9 +3689,9 @@ curr_cent=0.d0
 do i=1,device%fe_rep%mesh%nc
   IF(device%fe_rep%mesh%reg(i)/=1)CYCLE
   CALL gs_cell_quad(self,i,psi_eval%vals,quad)
-  DO m=1,quad%np
-    CALL device%fe_rep%mesh%jacobian(i,quad%pts(:,m),goptmp,v)
-    CALL psi_eval%interp(i,quad%pts(:,m),goptmp,psitmp)
+  do m=1,quad%np
+    call device%fe_rep%mesh%jacobian(i,quad%pts(:,m),goptmp,v)
+    call psi_eval%interp(i,quad%pts(:,m),goptmp,psitmp)
     ! IF(psitmp(1)<self%plasma_bounds(1).OR.psitmp(1)>self%plasma_bounds(2))CYCLE
     pt=device%fe_rep%mesh%log2phys(i,quad%pts(:,m))
     !---Compute Magnetic Field
@@ -4438,7 +4438,7 @@ real(8) :: goptmp(3,3),v,psitmp(1),pt(3)
 real(8) :: Btor
 integer(4) :: i,m
 type(gs_factory), pointer :: device
-TYPE(oft_quad_type), POINTER :: quad
+type(oft_quad_type), pointer :: quad
 device=>self%device
 !---
 psi_eval%u=>self%psi
@@ -4448,9 +4448,9 @@ dflux=0.d0
 do i=1,device%fe_rep%mesh%nc
   IF(device%fe_rep%mesh%reg(i)/=1)CYCLE
   CALL gs_cell_quad(self,i,psi_eval%vals,quad)
-  DO m=1,quad%np
-    CALL device%fe_rep%mesh%jacobian(i,quad%pts(:,m),goptmp,v)
-    CALL psi_eval%interp(i,quad%pts(:,m),goptmp,psitmp)
+  do m=1,quad%np
+    call device%fe_rep%mesh%jacobian(i,quad%pts(:,m),goptmp,v)
+    call psi_eval%interp(i,quad%pts(:,m),goptmp,psitmp)
     ! IF(psitmp(1)<self%plasma_bounds(1).OR.psitmp(1)>self%plasma_bounds(2))CYCLE
     pt=device%fe_rep%mesh%log2phys(i,quad%pts(:,m))
     IF(gs_test_bounds(self,pt).AND.(psitmp(1)>self%plasma_bounds(1)))THEN
@@ -4582,7 +4582,7 @@ end subroutine psimax_error_grad
 !------------------------------------------------------------------------------
 !> Get q profile for equilibrium
 !------------------------------------------------------------------------------
-SUBROUTINE gs_get_qprof(gseq,nr,psi_q,prof,dl,rbounds,zbounds,ravgs,fsa_avgs,shape_geo,geom_only)
+subroutine gs_get_qprof(gseq,nr,psi_q,prof,dl,rbounds,zbounds,ravgs,fsa_avgs,shape_geo,geom_only)
 class(gs_equil), intent(inout) :: gseq !< G-S object
 integer(4), intent(in) :: nr !< Number of flux surfaces to sample
 real(8), intent(in) :: psi_q(nr) !< Locations to sample in normalized flux
@@ -4593,7 +4593,7 @@ real(8), optional, intent(out) :: zbounds(2,2) !< Vertical bounds of surface `ps
 real(8), optional, intent(out) :: ravgs(nr,4) !< Flux surface averages <R>, <1/R>, <1/R^2>, and dV/dPsi
 real(8), optional, intent(out) :: fsa_avgs(nr,4) !< Flux surface averages <|grad(psi)|>, <|grad(psi)|^2>, <B_p^2>, <1/B^2>
 real(8), optional, intent(out) :: shape_geo(nr,6) !< Per-surface R_min, R_max, Z_min, Z_max, R(Z_min), R(Z_max)
-LOGICAL, OPTIONAL, INTENT(in) :: geom_only !< Return \f$ q/F \f$ (independent of F profile)
+logical, optional, intent(in) :: geom_only !< Return \f$ q/F \f$ (independent of F profile)
 real(8) :: psi_surf,rmax,x1,x2,raxis,zaxis,fpol,qpsi
 real(8) :: pt(3),pt_last(3),pt_proj(3),f(3),psi_tmp(1),gop(3,3)
 type(oft_lag_brinterp), target :: psi_int
@@ -4601,7 +4601,7 @@ real(8), pointer :: ptout(:,:)
 real(8), parameter :: tol=1.d-10
 integer(4) :: i,j,cell,imin_r,imax_r,imin_z,imax_z
 integer(4), parameter :: nlcfs=1000
-LOGICAL :: lcfs_all,lcfs_any,geo,lcfs_ok,cc_done(nr)
+logical :: lcfs_all,lcfs_any,geo,lcfs_ok,cc_done(nr)
 type(gsinv_interp), pointer :: field
 TYPE(spline_type) :: lcfs_rz
 CHARACTER(LEN=OFT_ERROR_SLEN) :: error_str
