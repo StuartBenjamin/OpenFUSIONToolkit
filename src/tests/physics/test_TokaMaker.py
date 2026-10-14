@@ -1953,6 +1953,13 @@ def run_ITER_torflux_case(fe_order, test_type, mp_q):
             _, its = mygs.solve(return_its=True)
             ref = _torflux_ref(mygs,its)
             pmap = _torflux_phi_map(mygs)
+            # A bootstrap profile on Phi_N replacing one on psi_N keeps F*F', also across save/load
+            _, f, fp, _, _ = mygs.get_profiles(npsi=60)
+            mygs.set_profiles(ffp_prof=dict(jphi,type='jphi-split-bootstrap',coord='phi_n_relabel'))
+            mygs.copy_eq().save_TokaMaker('torflux_carry.h5')
+            mygs.replace_eq(source_file='torflux_carry.h5')
+            _, f1, fp1, _, _ = mygs.get_profiles(npsi=60)
+            results['carry_err'] = np.max(np.abs(f1*fp1-f*fp))/np.max(np.abs(f*fp))
             mygs.set_profiles(ffp_prof=dict(jphi,x=_torflux_to_phi(x,pmap),coord='phi_n_relabel'),pp_prof=pp)
             init()
             _, its = mygs.solve(return_its=True)
@@ -2048,6 +2055,7 @@ def test_ITER_torflux_jphi(order):
     results = mp_run(run_ITER_torflux_case,(order,'jphi'),timeout=120)
     assert results is not None
     _torflux_check(results['phi_n_relabel'],1.E-3,2.E-3,results['psi_its'])
+    assert results['carry_err'] < 1.E-3
     assert results['phi_n_rejected']
 
 

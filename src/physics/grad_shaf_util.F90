@@ -92,7 +92,7 @@ INTEGER(4) :: io_unit
 ! LOGICAL :: zero_grad
 CHARACTER(LEN=32) :: profType,coordType
 CHARACTER(LEN=128) :: line
-INTEGER(4) :: ios
+INTEGER(i4) :: ios
 !---First line: "<type> [coord]"
 OPEN(NEWUNIT=io_unit,FILE=TRIM(filename))
 READ(io_unit,'(A)')line
