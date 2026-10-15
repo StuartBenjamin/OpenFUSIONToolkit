@@ -109,7 +109,7 @@ SELECT CASE(TRIM(coordType))
   CASE("psi_n")
   CASE("phi_n")
     CALL torflux_wrap(F,1)
-  CASE("phi_n_relabel")
+  CASE("phi_n_coord")
     CALL torflux_wrap(F,2)
   CASE DEFAULT
     CALL oft_abort('Invalid profile coordinate "'//TRIM(coordType)//'"','gs_profile_load',__FILE__)

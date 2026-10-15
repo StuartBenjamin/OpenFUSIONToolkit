@@ -589,7 +589,7 @@ IF(PRESENT(mapped))mapped=.TRUE.
 IF(.NOT.ASSOCIATED(self%phi_wrapper))RETURN
 SELECT TYPE(wrap=>self%phi_wrapper)
   TYPE IS(phi_flux_wrapper)
-    IF(.NOT.wrap%relabel)CALL oft_abort('Jphi profiles on toroidal flux must use "phi_n_relabel"', &
+    IF(.NOT.wrap%coord_only)CALL oft_abort('Jphi profiles on toroidal flux must use "phi_n_coord"', &
       'jphi_psi_nodes',__FILE__)
     IF(.NOT.ASSOCIATED(wrap%map))CALL oft_abort('Profile on toroidal flux not attached, call torflux_setup', &
       'jphi_psi_nodes',__FILE__)

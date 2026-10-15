@@ -248,16 +248,16 @@ END TYPE torflux_map
 !> Flux function on normalized toroidal flux, evaluated through @ref torflux_map
 !!
 !! `phi_rep` is any profile whose coordinate is \f$ \hat{\Phi} \f$ instead of \f$ \hat{\psi} \f$:
-!! - "phi_n" (`relabel=.FALSE.`): \f$ f(\psi) = Y(\hat{\Phi}) \f$ and \f$ f' = Y'(\hat{\Phi}) J \f$
-!! - "phi_n_relabel" (`relabel=.TRUE.`): `phi_rep` holds \f$ dY/d\hat{\psi} \f$ on a \f$ \hat{\Phi} \f$
-!!   grid, so \f$ f' = Y'(\hat{\Phi}) \f$ and `f` integrates it over \f$ \hat{\psi} \f$
+!! - "phi_n" (derivative profiles, eg. \f$ P' \f$): \f$ f(\psi) = Y(\hat{\Phi}) \f$ and \f$ f' = Y'(\hat{\Phi}) J \f$
+!! - "phi_n_coord" (`coord_only`, value profiles, eg. \f$ j_\phi \f$, \f$ T_e \f$): only the coordinate is
+!!   \f$ \hat{\Phi} \f$, so \f$ f' = Y'(\hat{\Phi}) \f$ and `f` integrates it over \f$ \hat{\psi} \f$
 !------------------------------------------------------------------------------
 TYPE, EXTENDS(flux_func) :: phi_flux_wrapper
-  LOGICAL :: relabel = .FALSE. !< "phi_n_relabel" (otherwise "phi_n")
+  LOGICAL :: coord_only = .FALSE. !< "phi_n_coord" (otherwise "phi_n")
   CLASS(flux_func), POINTER :: phi_rep => NULL() !< Profile on \f$ \hat{\Phi} \f$
   CLASS(torflux_map), POINTER :: map => NULL() !< Equilibrium map (`gs_equil%torflux`)
   INTEGER(i4) :: fint_stamp = -1 !< Map stamp `fint` was built for
-  REAL(r8), POINTER, DIMENSION(:) :: fint => NULL() !< Cumulative \f$ \int f' d\hat{\psi} \f$ on map surfaces (relabel)
+  REAL(r8), POINTER, DIMENSION(:) :: fint => NULL() !< Cumulative \f$ \int f' d\hat{\psi} \f$ on map surfaces (`coord_only`)
   REAL(r8), POINTER, DIMENSION(:,:) :: fcof => NULL() !< Per-interval quartic for partial integrals of `fint` [4,ns-1]
 CONTAINS
   PROCEDURE :: delete => phi_wrap_delete
@@ -276,7 +276,7 @@ CONTAINS
 END TYPE phi_flux_wrapper
 !---Toroidal flux map internals
 PRIVATE :: sort_unique, quad_interp, fd_deriv, tmap_find, tmap_index, tmap_lookup, &
-  phi_wrap_map, phi_wrap_norm, phi_wrap_relabel_int, phi_wrap_relabel_cof, phi_wrap_relabel_f, &
+  phi_wrap_map, phi_wrap_norm, phi_wrap_int, phi_wrap_int_cof, phi_wrap_int_f, &
   phi_wrap_build_fint
 contains
 !------------------------------------------------------------------------------
@@ -1644,7 +1644,7 @@ real(8), intent(out) :: c(:)
 c(1)=self%gamma
 end subroutine wesson_cofs_get
 !------------------------------------------------------------------------------
-!> Wrap `F` as a profile on normalized toroidal flux (`coord`: 1 "phi_n", 2 "phi_n_relabel")
+!> Wrap `F` as a profile on normalized toroidal flux (`coord`: 1 "phi_n", 2 "phi_n_coord")
 !------------------------------------------------------------------------------
 SUBROUTINE torflux_wrap(F,coord)
 CLASS(flux_func), POINTER, INTENT(inout) :: F !< Profile on \f$ \hat{\Phi} \f$, replaced by its wrapper
@@ -1653,7 +1653,7 @@ CLASS(phi_flux_wrapper), POINTER :: wrap
 IF(coord==0)RETURN
 IF((coord<0).OR.(coord>2))CALL oft_abort('Unknown profile coordinate','torflux_wrap',__FILE__)
 ALLOCATE(wrap)
-wrap%relabel=(coord==2)
+wrap%coord_only=(coord==2)
 wrap%phi_rep=>F
 SELECT TYPE(F)
   CLASS IS(spline_flux_func)
@@ -1721,13 +1721,13 @@ CALL attach(gseq%ni,'ni',.TRUE.)
 CALL attach(gseq%Zeff,'Zeff',.TRUE.)
 CALL attach(gseq%jphi_fixed,'jphi_fixed',.TRUE.)
 CONTAINS
-!---Attach a profile (value-type profiles on toroidal flux must be relabelled)
+!---Attach a profile (value-type profiles on toroidal flux must be "phi_n_coord")
 SUBROUTINE attach(F,name,value_type)
 CLASS(flux_func), POINTER, INTENT(in) :: F
 CHARACTER(LEN=*), INTENT(in) :: name
 LOGICAL, INTENT(in) :: value_type
 IF(.NOT.ASSOCIATED(F))RETURN
-IF(value_type.AND.(F%coord()==1))CALL oft_abort(name//' profile on toroidal flux must use "phi_n_relabel"', &
+IF(value_type.AND.(F%coord()==1))CALL oft_abort(name//' profile on toroidal flux must use "phi_n_coord"', &
   'torflux_setup',__FILE__)
 CALL torflux_attach(F,gseq)
 END SUBROUTINE attach
@@ -1789,10 +1789,10 @@ REAL(r8), INTENT(in) :: psi
 REAL(r8) :: b,psim,jac
 IF(.NOT.phi_wrap_map(self,psi,psim,jac))THEN
   b=self%phi_rep%f(psi)
-ELSE IF(.NOT.self%relabel)THEN
+ELSE IF(.NOT.self%coord_only)THEN
   b=self%phi_rep%f(psim)
 ELSE
-  b=phi_wrap_relabel_f(self,psi)
+  b=phi_wrap_int_f(self,psi)
 END IF
 END FUNCTION phi_wrap_f
 !------------------------------------------------------------------------------
@@ -1804,7 +1804,7 @@ REAL(r8), INTENT(in) :: psi
 REAL(r8) :: b,psim,jac
 IF(.NOT.phi_wrap_map(self,psi,psim,jac))THEN
   b=self%phi_rep%fp(psi)
-ELSE IF(.NOT.self%relabel)THEN
+ELSE IF(.NOT.self%coord_only)THEN
   b=self%phi_rep%fp(psim)*jac
 ELSE
   b=self%phi_rep%fp(psim)
@@ -1819,7 +1819,7 @@ REAL(r8), INTENT(in) :: psi
 REAL(r8) :: b,psim,jac,djac,x1,dpsi
 IF(.NOT.phi_wrap_map(self,psi,psim,jac,djac))THEN
   b=self%phi_rep%fpp(psi)
-ELSE IF(.NOT.self%relabel)THEN
+ELSE IF(.NOT.self%coord_only)THEN
   CALL phi_wrap_norm(self,x1,dpsi)
   b=self%phi_rep%fpp(psim)*jac**2 + self%phi_rep%fp(psim)*djac/dpsi
 ELSE
@@ -1829,15 +1829,15 @@ END FUNCTION phi_wrap_fpp
 !------------------------------------------------------------------------------
 !> Integral of `phi_rep%fp` over \f$ 1-\hat{\psi} \in [a,b] \f$ (4-point Gauss)
 !------------------------------------------------------------------------------
-FUNCTION phi_wrap_relabel_int(self,a,b) RESULT(val)
+FUNCTION phi_wrap_int(self,a,b) RESULT(val)
 CLASS(phi_flux_wrapper), INTENT(inout) :: self
 REAL(r8), INTENT(in) :: a,b
 REAL(r8) :: val,cof(4)
-CALL phi_wrap_relabel_cof(self,a,b,cof)
+CALL phi_wrap_int_cof(self,a,b,cof)
 val=SUM(cof)
-END FUNCTION phi_wrap_relabel_int
+END FUNCTION phi_wrap_int
 !------------------------------------------------------------------------------
-!> Rebuild the cumulative integral table on the map surfaces (relabel only)
+!> Rebuild the cumulative integral table on the map surfaces (`coord_only` profiles)
 !------------------------------------------------------------------------------
 SUBROUTINE phi_wrap_build_fint(self)
 CLASS(phi_flux_wrapper), INTENT(inout) :: self
@@ -1847,9 +1847,9 @@ IF(ASSOCIATED(self%fcof))DEALLOCATE(self%fcof)
 self%fint_stamp=-1
 IF(self%map%ns<2)RETURN
 ALLOCATE(self%fint(self%map%ns),self%fcof(4,self%map%ns-1))
-self%fint(1)=phi_wrap_relabel_int(self,0.d0,self%map%psis(1))
+self%fint(1)=phi_wrap_int(self,0.d0,self%map%psis(1))
 DO k=2,self%map%ns
-  CALL phi_wrap_relabel_cof(self,self%map%psis(k-1),self%map%psis(k),self%fcof(:,k-1))
+  CALL phi_wrap_int_cof(self,self%map%psis(k-1),self%map%psis(k),self%fcof(:,k-1))
   self%fint(k)=self%fint(k-1)+SUM(self%fcof(:,k-1))
 END DO
 self%fint_stamp=self%map%stamp
@@ -1860,7 +1860,7 @@ END SUBROUTINE phi_wrap_build_fint
 !! Exact integral of the cubic interpolating `phi_rep%fp` at the 4 Gauss points of [a,b],
 !! so the full-interval value (sum of `cof`) is the 4-point Gauss integral.
 !------------------------------------------------------------------------------
-SUBROUTINE phi_wrap_relabel_cof(self,a,b,cof)
+SUBROUTINE phi_wrap_int_cof(self,a,b,cof)
 CLASS(phi_flux_wrapper), INTENT(inout) :: self
 REAL(r8), INTENT(in) :: a,b
 REAL(r8), INTENT(out) :: cof(4)
@@ -1891,11 +1891,11 @@ DO i=1,4
 END DO
 !---Integrate: c_j u^j -> c_j u^(j+1)/(j+1), scaled by interval width
 cof=cof*(b-a)/[1.d0,2.d0,3.d0,4.d0]
-END SUBROUTINE phi_wrap_relabel_cof
+END SUBROUTINE phi_wrap_int_cof
 !------------------------------------------------------------------------------
-!> Evaluate \f$ (\psi_0-\psi_a) \int f'\,d(1-\hat{\psi}) \f$ from the LCFS to \f$ 1-\hat{\psi} \f$ (relabel)
+!> Evaluate \f$ (\psi_0-\psi_a) \int f'\,d(1-\hat{\psi}) \f$ from the LCFS to \f$ 1-\hat{\psi} \f$ (`coord_only`)
 !------------------------------------------------------------------------------
-FUNCTION phi_wrap_relabel_f(self,psi) RESULT(b)
+FUNCTION phi_wrap_int_f(self,psi) RESULT(b)
 CLASS(phi_flux_wrapper), INTENT(inout) :: self
 REAL(r8), INTENT(in) :: psi
 REAL(r8) :: b,x1,dpsi,psihat,u
@@ -1904,21 +1904,21 @@ CALL phi_wrap_norm(self,x1,dpsi)
 psihat=(psi-x1)/dpsi
 IF(self%fint_stamp/=self%map%stamp)THEN
   !---Table unavailable, integrate over all map intervals (slow)
-  b=phi_wrap_relabel_int(self,0.d0,MIN(psihat,self%map%psis(1)))
+  b=phi_wrap_int(self,0.d0,MIN(psihat,self%map%psis(1)))
   DO lo=2,self%map%ns
     IF(psihat<=self%map%psis(lo-1))EXIT
-    b=b+phi_wrap_relabel_int(self,self%map%psis(lo-1),MIN(psihat,self%map%psis(lo)))
+    b=b+phi_wrap_int(self,self%map%psis(lo-1),MIN(psihat,self%map%psis(lo)))
   END DO
-  IF(psihat>self%map%psis(self%map%ns))b=b+phi_wrap_relabel_int(self,self%map%psis(self%map%ns),psihat)
+  IF(psihat>self%map%psis(self%map%ns))b=b+phi_wrap_int(self,self%map%psis(self%map%ns),psihat)
 ELSE IF(psihat<=self%map%psis(1))THEN
-  b=phi_wrap_relabel_int(self,0.d0,psihat)
+  b=phi_wrap_int(self,0.d0,psihat)
 ELSE
   lo=tmap_lookup(self%map,psihat)
   u=(psihat-self%map%psis(lo))/(self%map%psis(lo+1)-self%map%psis(lo))
   b=self%fint(lo)+u*(self%fcof(1,lo)+u*(self%fcof(2,lo)+u*(self%fcof(3,lo)+u*self%fcof(4,lo))))
 END IF
 b=b*dpsi
-END FUNCTION phi_wrap_relabel_f
+END FUNCTION phi_wrap_int_f
 !------------------------------------------------------------------------------
 !> Update the profile on \f$ \hat{\Phi} \f$ for the new equilibrium
 !------------------------------------------------------------------------------
@@ -1933,15 +1933,15 @@ dpsi=ABS(gseq%plasma_bounds(2)-gseq%plasma_bounds(1))
 IF(.NOT.((dpsi>0.d0).AND.(dpsi<HUGE(dpsi))))RETURN ! No closed surfaces to map
 CALL self%phi_rep%update(gseq)
 self%ndofs=self%phi_rep%ndofs
-IF(self%relabel)CALL phi_wrap_build_fint(self)
+IF(self%coord_only)CALL phi_wrap_build_fint(self)
 END SUBROUTINE phi_wrap_update
 !------------------------------------------------------------------------------
-!> Coordinate of `phi_rep` (1 "phi_n", 2 "phi_n_relabel")
+!> Coordinate of `phi_rep` (1 "phi_n", 2 "phi_n_coord")
 !------------------------------------------------------------------------------
 FUNCTION phi_wrap_coord(self) RESULT(coord)
 CLASS(phi_flux_wrapper), INTENT(in) :: self
 INTEGER(i4) :: coord
-coord=MERGE(2,1,self%relabel)
+coord=MERGE(2,1,self%coord_only)
 END FUNCTION phi_wrap_coord
 !------------------------------------------------------------------------------
 !> Set the coefficients of `phi_rep`
@@ -1951,7 +1951,7 @@ CLASS(phi_flux_wrapper), INTENT(inout) :: self
 REAL(r8), INTENT(in) :: c(:)
 INTEGER(i4) :: ierr
 ierr=self%phi_rep%set_cofs(c)
-IF(self%relabel.AND.ASSOCIATED(self%map))CALL phi_wrap_build_fint(self)
+IF(self%coord_only.AND.ASSOCIATED(self%map))CALL phi_wrap_build_fint(self)
 END FUNCTION phi_wrap_cofs_update
 !------------------------------------------------------------------------------
 !> Get the coefficients of `phi_rep`
@@ -2023,7 +2023,7 @@ DO
   READ(tmp_unit,'(A)',IOSTAT=ios)line
   IF(ios/=0)EXIT
   IF(LEN_TRIM(line)==LEN(line))CALL oft_abort('Profile line too long','phi_wrap_save_txt',__FILE__)
-  IF(first)line=TRIM(line)//MERGE(' phi_n_relabel',' phi_n        ',self%relabel)
+  IF(first)line=TRIM(line)//MERGE(' phi_n_coord',' phi_n      ',self%coord_only)
   WRITE(io_unit,'(A)')TRIM(line)
   first=.FALSE.
 END DO
@@ -2379,7 +2379,7 @@ IF(ALLOCATED(pnew))DEALLOCATE(pnew)
 DEALLOCATE(phinodes,phitarg,psis,g,q,r,dq,cum)
 CALL build_all_fint
 CONTAINS
-!---Rebuild the relabel tables of all profiles against the current map
+!---Rebuild the integral tables of all profiles against the current map
 SUBROUTINE build_all_fint
 CALL build_fint(gseq%I)
 CALL build_fint(gseq%P)
@@ -2392,13 +2392,13 @@ CALL build_fint(gseq%ni)
 CALL build_fint(gseq%Zeff)
 CALL build_fint(gseq%jphi_fixed)
 END SUBROUTINE build_all_fint
-!---Rebuild the relabel table of a wrapped profile
+!---Rebuild the integral table of a wrapped profile
 SUBROUTINE build_fint(F)
 CLASS(flux_func), POINTER, INTENT(in) :: F
 IF(.NOT.ASSOCIATED(F))RETURN
 SELECT TYPE(F)
   TYPE IS(phi_flux_wrapper)
-    IF(F%relabel.AND.ASSOCIATED(F%map))CALL phi_wrap_build_fint(F)
+    IF(F%coord_only.AND.ASSOCIATED(F%map))CALL phi_wrap_build_fint(F)
 END SELECT
 END SUBROUTINE build_fint
 !---Warn and flag a failed update (previous map is kept)

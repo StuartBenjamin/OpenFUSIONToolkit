@@ -79,7 +79,7 @@ CONTAINS
   PROCEDURE(flux_func_eval), DEFERRED :: fp
   !> Evaluate second derivative of function
   PROCEDURE :: fpp => dummy_fpp
-  !> Coordinate of the profile (0 "psi_n", 1 "phi_n", 2 "phi_n_relabel")
+  !> Coordinate of the profile (0 "psi_n", 1 "phi_n", 2 "phi_n_coord")
   PROCEDURE :: coord => flux_func_coord
   !> Update function to match new equilibrium solution
   PROCEDURE(flux_func_update), DEFERRED :: update
