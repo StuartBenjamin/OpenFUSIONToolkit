@@ -1328,6 +1328,11 @@ TYPE(gs_equil), INTENT(inout) :: gs !< Needs docs
 REAL(8) :: err !< Needs docs
 REAL(8) :: qval
 qval = self%eval(gs)
+IF(qval<-1.d98)THEN ! Trace failed (-1.d99), skip the constraint
+  CALL oft_warn('fit_q_error: q trace failed, constraint skipped')
+  err = 0.d0
+  RETURN
+END IF
 err = (qval - self%val)*self%wt
 IF(self%type==-1.AND.qval>self%val)err=0.d0
 END FUNCTION fit_q_error
@@ -1350,34 +1355,27 @@ psi0=0.d0; psi1=1.d0
 !   IF(.NOT.gs%free)psi0 = psi0 + (psi1-psi0)*2.d-2
 ! END IF
 !
-IF(ABS(self%type)==1)THEN
+IF((ABS(self%type)==1).OR.(self%type==2))THEN
   do j=2,31
     psi_q(j-1)=(psi1-psi0)*((j-1)/REAL(npsi,8)) + psi0
   end do
   CALL gs_get_qprof(gs,npsi,psi_q,qprof)
-  qmin = MINVAL(qprof)
-  qmax = MAXVAL(qprof)
-  IF(qmax<0.d0)THEN
-    val = ABS(qmax)
-  ELSE
-    val = qmin
+  !---Use only the surfaces that traced (-1.d99 if all failed)
+  IF(ALL(qprof<-1.d98))THEN
+    val = -1.d99
+    RETURN
   END IF
-ELSEIF(self%type==2)THEN
-  do j=2,31
-    psi_q(j-1)=(psi1-psi0)*((j-1)/REAL(npsi,8)) + psi0
-  end do
-  CALL gs_get_qprof(gs,npsi,psi_q,qprof)
-  qmin = MINVAL(qprof)
-  qmax = MAXVAL(qprof)
-  IF(qmax<0.d0)THEN
-    val = ABS(qmin)
+  qmin = MINVAL(qprof,MASK=qprof>-1.d98)
+  qmax = MAXVAL(qprof,MASK=qprof>-1.d98)
+  IF(self%type==2)THEN
+    val = MERGE(ABS(qmin),qmax,qmax<0.d0)
   ELSE
-    val = qmax
+    val = MERGE(ABS(qmax),qmin,qmax<0.d0)
   END IF
 ELSEIF(self%type==3)THEN
   psi_q(1)=self%loc
   CALL gs_get_qprof(gs,1,psi_q,qprof)
-  val = qprof(1)
+  val = qprof(1) ! -1.d99 if the trace failed
   ! val = ABS(linterp(qprof(2,:), qprof(1,:), 30, self%loc))
 END IF
 END FUNCTION fit_q_eval
