@@ -33,7 +33,7 @@ USE axi_green, ONLY: green
 USE oft_gs, ONLY: gs_factory, gs_equil, gs_save_fields, gs_setup_walls, build_dels, flux_func, &
   gs_fixed_vflux, gs_get_qprof, gs_trace_surf, gs_b_interp, gs_j_interp, gs_prof_interp, &
   gs_plasma_mutual, gs_source, gs_err_reason, gs_coil_source, gs_coil_source_distributed, gs_vacuum_solve, &
-  gs_coil_mutual, gs_coil_mutual_distributed, gs_project_b, gs_save_mug, gs_update_bounds
+  gs_coil_mutual_pair, gs_project_b, gs_save_mug, gs_update_bounds
 USE oft_gs_util, ONLY: gs_comp_globals, gs_save_eqdsk, gs_save_ifile, gs_profile_load, gs_profile_save, &
   gs_calc_vloop, gs_save_tokamaker, gs_load_tokamaker
 USE oft_gs_profiles, ONLY: torflux_map, torflux_setup, torflux_attach, torflux_unwrap
@@ -100,6 +100,7 @@ TYPE, BIND(C) :: tokamaker_boot_ops_type
   REAL(c_double)  :: saw_relax = 1.d0             !< Under-relaxation of jphi_saw
   REAL(c_double)  :: saw_ramp = 1.d-2             !< Reset weight ramp in q deficit (0 = hard trigger)
   INTEGER(c_int)  :: saw_rule = 2                 !< Reset rule: 1 fuse (axis to rho_m), 2 local (each dip, two-sided)
+  INTEGER(c_int)  :: bs_interp = 2                !< Kinetic gradients and sawtooth reset: 1 linterp, 2 hermite, 3 cubic
 END TYPE tokamaker_boot_ops_type
 !---------------------------------------------------------------------------------
 !> TokaMaker wrapper object for Python API
@@ -657,6 +658,7 @@ TYPE IS (jphi_bs_flux_func)
   I%boot_ops%saw_relax = bops%saw_relax
   I%boot_ops%saw_ramp = bops%saw_ramp
   I%boot_ops%saw_rule = bops%saw_rule
+  I%boot_ops%bs_interp = bops%bs_interp
 CLASS DEFAULT
   CALL copy_string('Run set_profiles with a jphi-split-bootstrap profile before calling set_boot_ops.',error_str)
 END SELECT
@@ -692,6 +694,7 @@ TYPE IS (jphi_bs_flux_func)
   bops%saw_relax = I%boot_ops%saw_relax
   bops%saw_ramp = I%boot_ops%saw_ramp
   bops%saw_rule = I%boot_ops%saw_rule
+  bops%bs_interp = I%boot_ops%bs_interp
 CLASS DEFAULT
   initialized = .FALSE. ! Not a bootstrap profile: no options
 END SELECT
@@ -2442,20 +2445,7 @@ CALL tMaker_obj%device%zerob_bc%apply(tmp_vec)
 CALL gs_vacuum_solve(tMaker_obj%device,tMaker_obj%device%psi_coil(ic)%f,tmp_vec)
 ! Update coil mutual inductances
 DO i=1,tMaker_obj%device%ncoils
-  IF(ASSOCIATED(tMaker_obj%device%dist_coil(i)%v))THEN
-    CALL gs_coil_mutual_distributed(tMaker_obj%device,i,tMaker_obj%device%psi_coil(ic)%f,tMaker_obj%device%dist_coil(i)%v,tMaker_obj%device%Lcoils(i,ic))
-  ELSE
-    CALL gs_coil_mutual(tMaker_obj%device,i,tMaker_obj%device%psi_coil(ic)%f,tMaker_obj%device%Lcoils(i,ic))
-  END IF
-  IF(i/=ic)THEN ! Integral can be slightly different in each direction so compute both ways and average
-    IF(ASSOCIATED(tMaker_obj%device%dist_coil(ic)%v))THEN
-      CALL gs_coil_mutual_distributed(tMaker_obj%device,ic,tMaker_obj%device%psi_coil(i)%f,tMaker_obj%device%dist_coil(ic)%v,tMaker_obj%device%Lcoils(ic,i))
-    ELSE
-      CALL gs_coil_mutual(tMaker_obj%device,ic,tMaker_obj%device%psi_coil(i)%f,tMaker_obj%device%Lcoils(ic,i))
-    END IF
-    tMaker_obj%device%Lcoils(i,ic)=(tMaker_obj%device%Lcoils(ic,i)+tMaker_obj%device%Lcoils(i,ic))/2.d0
-    tMaker_obj%device%Lcoils(ic,i)=tMaker_obj%device%Lcoils(i,ic)
-  END IF
+  CALL gs_coil_mutual_pair(tMaker_obj%device,i,ic)
 END DO
 CALL tmp_vec%delete()
 DEALLOCATE(tmp_vec)
