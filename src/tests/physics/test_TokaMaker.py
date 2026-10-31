@@ -923,6 +923,7 @@ ITER_eq_dict = {
 @pytest.mark.parametrize("helicity", (1.0,-1.0))
 def test_ITER_eq(order,helicity):
     eq_dict = ITER_eq_dict.copy()
+    eq_dict['l_i_std'] = 1.1532768229095525 # Other l_i normalization from the same get_stats call
     eq_dict['tflux'] *= helicity
     eq_dict['dflux'] *= helicity
     eq_dict['q_0'] *= helicity
