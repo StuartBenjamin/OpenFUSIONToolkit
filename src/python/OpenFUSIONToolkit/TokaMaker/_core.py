@@ -3576,7 +3576,7 @@ class TokaMaker_equilibrium():
         @param li_normalization Form of normalized \f$ l_i \f$ ('std', 'ITER')
         @param geom_type Method for computing geometric major/minor radius ('max': Use LCFS extrema, 'mid': Use axis plane extrema)
         @param beta_Ip Override \f$ I_p \f$ used for beta calculations
-        @result Dictionary of equilibrium parameters
+        @result Dictionary of equilibrium parameters (`l_i` as set by `li_normalization`; both forms in `l_i_std`, `l_i_iter`)
         '''
         Ip,centroid,vol,pvol,dflux,tflux,Bp_vol = self.get_globals()
         if beta_Ip is not None:
@@ -3621,10 +3621,12 @@ class TokaMaker_equilibrium():
                         zbounds[0,:] = x_points[-(i+1),:]
                         break
         # Compute normalized inductance
+        li_std = (Bp_vol/vol)/numpy.power(mu0*Ip/dl,2)
+        li_iter = 2.0*Bp_vol/(numpy.power(mu0*Ip,2)*self.o_point[0])
         if li_normalization.lower() == 'std':
-            li = (Bp_vol/vol)/numpy.power(mu0*Ip/dl,2)
+            li = li_std
         elif li_normalization.lower() == 'iter':
-            li = 2.0*Bp_vol/(numpy.power(mu0*Ip,2)*self.o_point[0])
+            li = li_iter
         else:
             raise ValueError('Invalid "li_normalization"')
         # Compute geometric major/minor radius
@@ -3661,7 +3663,9 @@ class TokaMaker_equilibrium():
             'beta_pol': 100.0*(2.0*pvol*mu0/vol)/numpy.power(Ip*mu0/dl,2),
             'dflux': dflux,
             'tflux': tflux,
-            'l_i': li
+            'l_i': li,
+            'l_i_std': li_std,
+            'l_i_iter': li_iter
         }
         if abs(self._F0) > 0.0:
             F0_abs = abs(self._F0)
