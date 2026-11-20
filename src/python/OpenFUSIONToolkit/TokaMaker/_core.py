@@ -2497,7 +2497,7 @@ class TokaMaker():
             raise Exception(error_string.value)
         return time.value, dt.value, nl_its.value, lin_its.value, nretry.value
 
-    def solve_bootstrap(self, ffp_prof, te_prof, ne_prof, ti_prof, ni_prof, Zeff, Ip_target, F0=None, pres_prof=None, jphi_fixed_prof=None, p_fixed_prof=None, coord=None, jphi_saw_prof=None, **kwargs):
+    def solve_bootstrap(self, ffp_prof, te_prof, ne_prof, ti_prof, ni_prof, Zeff, Ip_target, F0=None, pres_prof=None, jphi_fixed_prof=None, p_fixed_prof=None, coord=None, jphi_saw_prof=None, allow_pres_below_kinetic=False, **kwargs):
         r'''! Solve G-S equilibrium with self-consistent bootstrap current from kinetic profiles
 
         Derives a pressure-gradient profile \f$P'(\hat{\psi})\f$ from the supplied kinetic
@@ -2505,7 +2505,7 @@ class TokaMaker():
         By default the pressure is computed from the kinetic profiles as
         \f$P = e_C(n_e T_e + n_i T_i) + P_{fixed}\f$; if ``pres_prof`` is supplied it overrides this,
         allowing additional contributions (e.g. fast-ion pressure) to be included provided the
-        total pressure is nowhere less than the kinetic pressure.
+        total pressure is nowhere less than the kinetic pressure (unless ``allow_pres_below_kinetic``).
         Temperature profiles are expected in keV; density profiles in m\f$^{-3}\f$.
 
         The keyword inputs (`F0`, `pres_prof`, `p_fixed_prof`, `jphi_fixed_prof`, `jphi_saw_prof`, `coord`)
@@ -2534,6 +2534,8 @@ class TokaMaker():
           ``'y'``: \f$j_\phi\f$ [A/m\f$^2\f$], e.g. a source's sawtooth current), added without rescaling. With
           ``saw_q_s`` > 0 the reset current is added to it (returned as ``'jphi_saw'``)
         @param coord Coordinate of all ``'x'`` grids: ``'psi_n'`` (default) or ``'phi_n'`` (normalized toroidal flux).
+        @param allow_pres_below_kinetic Accept a ``pres_prof`` below the kinetic pressure (default: False); the bootstrap
+          current still comes from the kinetic profiles
 
         @par Bootstrap solver options (forwarded to ``set_boot_ops()``)
         @param isolate_edge_jbs Isolate the edge bootstrap spike from the bulk (default: False)
@@ -2648,7 +2650,7 @@ class TokaMaker():
                 if _key not in pres_prof:
                     raise ValueError(f"pres_prof is missing required key '{_key}'")
             pres_vals = _bs_interpolant(bs_interp, pres_prof['x'], pres_prof['y'])(psi_sample)
-            if numpy.any(pres_vals < pressure):
+            if (not allow_pres_below_kinetic) and numpy.any(pres_vals < pressure):
                 raise ValueError(
                     "pres_prof must be >= the kinetic pressure (eC*(ne*Te + ni*Ti)) at every point on the psi grid"
                 )
