@@ -1983,6 +1983,18 @@ def run_ITER_bootstrap_case_internal(mesh_resolution, fe_order, mp_q):
         p_tot = p_kin + pf
         if not np.isclose(P_ax_pfix, p_tot[0] - p_tot[-1], rtol=1e-4):
             raise AssertionError(f"axis pressure {P_ax_pfix:.6e} != kinetic + p_fixed drop {p_tot[0] - p_tot[-1]:.6e}")
+        # A pres_prof below the kinetic pressure is rejected unless allow_pres_below_kinetic
+        p_low = {'x': psi_sample, 'y': 0.95 * p_kin}
+        try:
+            mygs.solve_bootstrap(Zeff=Zeff_val, pres_prof=p_low, **zeff_common_kwargs)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("pres_prof below the kinetic pressure did not raise ValueError")
+        mygs.solve_bootstrap(Zeff=Zeff_val, pres_prof=p_low, allow_pres_below_kinetic=True, **zeff_common_kwargs)
+        P_ax_low = np.max(mygs.get_profiles(psi=np.array([0.0, 1.0]))[3])
+        if not np.isclose(P_ax_low, 0.95 * (p_kin[0] - p_kin[-1]), rtol=1e-4):
+            raise AssertionError(f"allow_pres_below_kinetic: axis pressure {P_ax_low:.6e} is not pres_prof's drop")
         mygs.boot_reset()
         mygs.solve_bootstrap(Zeff=Zeff_val, **zeff_common_kwargs)
         if np.isclose(np.max(mygs.get_profiles(psi=np.array([0.0, 1.0]))[3]), P_ax_pfix, rtol=1e-4):
