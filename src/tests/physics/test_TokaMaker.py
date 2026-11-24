@@ -2124,7 +2124,7 @@ def run_ITER_bootstrap_saw_internal(mesh_resolution, fe_order, mp_q):
         psi_q, q_on, _, _, _, _ = mygs.get_q(npsi=40)
         print(f"saw: q0 base {q_base[0]:.4f} -> {q_on[0]:.4f} (q_s {q_s:.4f}), rho_m {p_on['saw_rho_m']:.3f}, "
               f"rho_out {p_on['saw_rho_out']:.3f}, n_dips {p_on['saw_n_dips']}, max|j_saw| {np.max(np.abs(p_on['jphi_saw'])):.3e}")
-        if abs(q_on[0] - q_s) > 0.03:
+        if not (q_s - 1e-3 <= q_on[0] <= q_s + 0.03):  # The floor holds down to the axis
             raise AssertionError(f"saw: q0 {q_on[0]:.4f} not at q_s {q_s:.4f}")
         inner = q_on < q_s + dq
         inner[np.argmax(~inner):] = False
@@ -2158,7 +2158,7 @@ def run_ITER_bootstrap_saw_internal(mesh_resolution, fe_order, mp_q):
         p_d = mygs.solve_bootstrap(saw_q_s=q_s, saw_dq=dq, **dense)
         _, q_d, _, _, _, _ = mygs.get_q(npsi=40)
         print(f"saw dense axis: q0 {q_d[0]:.4f} (q_s {q_s:.4f}), rho_m {p_d['saw_rho_m']:.3f}")
-        if not np.all(np.isfinite(p_d['jphi_saw'])) or abs(q_d[0] - q_s) > 0.03:
+        if not np.all(np.isfinite(p_d['jphi_saw'])) or not (q_s - 1e-3 <= q_d[0] <= q_s + 0.03):
             raise AssertionError("saw: dense-axis grid reset not finite or q0 not at q_s")
         # (f) reversed shear, q_s between the off-axis min q and q0 (> q_s + dq): local raises only the dip
         #     (q0 kept, j_saw zero inside the region's inner end); fuse resets from the axis (q0 -> q_s)

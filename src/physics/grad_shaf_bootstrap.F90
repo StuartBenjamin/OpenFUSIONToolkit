@@ -853,11 +853,11 @@ INTEGER(i4), INTENT(out) :: ierr !< 0 on success, nonzero if the reset failed (w
 INTEGER(i4) :: n, i, k, n_dips, nk
 INTEGER(i4), ALLOCATABLE :: kk(:)
 REAL(r8), PARAMETER :: psi_ax = 1.0e-4_r8
-REAL(r8) :: rho_s, rho_m, rho_out, w, wf, dAmin, alast, psi, h
-REAL(r8), ALLOCATABLE :: q_eq(:), c1(:), rho(:), qb(:), Ib(:), Ie(:), Ar(:), ap(:), qn(:), djr(:), wr(:), r(:), &
+REAL(r8) :: rho_s, rho_m, rho_out, w, wf, alast, psi, h
+REAL(r8), ALLOCATABLE :: q_eq(:), c1(:), rho(:), qb(:), qr(:), Ib(:), Ie(:), Ar(:), ap(:), qn(:), djr(:), wr(:), r(:), &
   phi(:), g(:), djn(:), wn(:), jn(:)
 n = SIZE(xn)
-ALLOCATE(q_eq(n), c1(n), rho(n), qb(n), Ib(n), Ie(n), Ar(n), ap(n), qn(n), djr(n), wr(n), r(n), phi(n), g(n), &
+ALLOCATE(q_eq(n), c1(n), rho(n), qb(n), qr(n), Ib(n), Ie(n), Ar(n), ap(n), qn(n), djr(n), wr(n), r(n), phi(n), g(n), &
   djn(n), wn(n), jn(n))
 !---q and dA/dpsi_N = oint dl/|grad psi_N| on the nodes, axis-first (index 1 = innermost node). Nodes
 !   without a closed surface (the LCFS, the axis, a failed surface) take the values of the next node
@@ -909,16 +909,15 @@ IF(.NOT.(phi(n) > 0.0_r8))THEN
   RETURN
 END IF
 rho = SQRT(phi/phi(n))
-!---Nodes kept for the reset: the axis (if it is a node) and every node whose bin adds >= dAmin
+!---Nodes kept for the reset: the axis (if it is a node) and every node whose bin adds area
 ALLOCATE(kk(n))
-dAmin = 0.25_r8*Ar(n)/REAL(n-1,r8)
 nk = 0
 alast = 0.0_r8
 IF(1.0_r8 - xn(n) < 1.0e-12_r8)THEN
   nk = 1; kk(1) = 1
 END IF
 DO i = 2, n
-  IF(Ar(i) - alast >= dAmin .OR. (i == n .AND. nk < 2))THEN
+  IF(Ar(i) > alast .OR. (i == n .AND. nk < 2))THEN
     nk = nk + 1; kk(nk) = i; alast = Ar(i)
   ELSE IF(i == n)THEN
     kk(nk) = n
@@ -933,11 +932,13 @@ IF(Ar(kk(1)) <= 0.0_r8 .AND. nk > 1)r(1) = r(2)
 DO i = 1, nk
   qb(i) = q_eq(kk(i))*r(i)
 END DO
-!---The reset differentiates q_base, so smooth its grid-scale roughness first (the shoulder itself is analytic)
+!---The reset differentiates q_base, so smooth its grid-scale roughness first (the shoulder itself is analytic);
+!   the floor is also held on the unsmoothed q_base (qr)
+qr(1:nk) = qb(1:nk)
 CALL quad_smooth(nk, rho(kk(1:nk)), qb(1:nk), saw_nsmooth)
 CALL saw_reset_1d(nk, rho(kk(1:nk)), qb(1:nk), Ib(kk(1:nk)), Ar(kk(1:nk)), c1(kk(1:nk)), &
                   self%boot_ops%saw_q_s, self%boot_ops%saw_dq, self%boot_ops%saw_ramp, &
-                  self%boot_ops%saw_rule, qn(1:nk), djr(1:nk), wr(1:nk), rho_s, rho_m, rho_out, n_dips, w, ierr)
+                  self%boot_ops%saw_rule, qn(1:nk), djr(1:nk), wr(1:nk), rho_s, rho_m, rho_out, n_dips, w, ierr, qr(1:nk))
 IF(ierr /= 0)THEN
   CALL oft_warn('saw_redistribute: sawtooth reset failed, keeping the last reset this update')
   RETURN
@@ -973,7 +974,7 @@ IF(self%boot_ops%diagnose_bs)THEN
   WRITE(*,'(A,3F8.4,I3,F7.3,2F8.4)') '  [saw] rho_s rho_m rho_out n_dips w q_base(0) q_new(0) = ', &
     rho_s, rho_m, rho_out, n_dips, w, qb(1), qn(1)
 END IF
-DEALLOCATE(q_eq, c1, rho, qb, Ib, Ie, Ar, ap, qn, djr, wr, r, phi, g, kk, djn, wn, jn)
+DEALLOCATE(q_eq, c1, rho, qb, qr, Ib, Ie, Ar, ap, qn, djr, wr, r, phi, g, kk, djn, wn, jn)
 END SUBROUTINE saw_redistribute
 !---------------------------------------------------------------------------------
 !> Slopes dy/dx at the nodes of a cubic through (x, y), x strictly monotonic: `method` 2 = pchip (Fritsch-Carlson:
@@ -1098,9 +1099,9 @@ END SUBROUTINE quad_smooth
 !! beyond the outermost q < q_s point), p C1 onto q at rho_m, weighted by w = clamp((q_s - min q)/ramp, 0, 1).
 !! rule 2 (local): each q < q_s + dq interval holding a q < q_s point is reset about its q minimum,
 !! weighted per interval (@ref local_reset); q is unchanged elsewhere, so dI = 0 at interval ends.
-!! dI = I*(q/q_new - 1), dj = (d dI/dA)/c1.
+!! dI = I*(q/q_new - 1) (with q_raw, lowered where the reset acts until q_raw*I/(I + dI) >= q_s), dj = (d dI/dA)/c1.
 !---------------------------------------------------------------------------------
-SUBROUTINE saw_reset_1d(n, rho, q, I, A, c1, q_s, dq, ramp, rule, q_new, dj, wr, rho_s, rho_m, rho_out, n_dips, w, ierr)
+SUBROUTINE saw_reset_1d(n, rho, q, I, A, c1, q_s, dq, ramp, rule, q_new, dj, wr, rho_s, rho_m, rho_out, n_dips, w, ierr, q_raw)
 INTEGER(i4), INTENT(in) :: n
 REAL(r8), INTENT(in) :: rho(n) !< Radius, ascending from the axis
 REAL(r8), INTENT(in) :: q(n) !< Base q
@@ -1112,6 +1113,7 @@ INTEGER(i4), INTENT(in) :: rule !< 1 = fuse, 2 = local
 REAL(r8), INTENT(out) :: q_new(n), dj(n), wr(n), rho_s, rho_m, rho_out, w
 INTEGER(i4), INTENT(out) :: n_dips
 INTEGER(i4), INTENT(out) :: ierr !< 0 on success, -1 if a gradient failed (no reset: q_new = q, dj = 0)
+REAL(r8), OPTIONAL, INTENT(in) :: q_raw(n) !< Base q before smoothing (`q` smoothed), held >= q_s where the reset acts
 INTEGER(i4) :: k, ia, n_low
 INTEGER(i4), ALLOCATABLE :: reg_start(:), reg_end(:)
 REAL(r8) :: qm
@@ -1166,6 +1168,7 @@ ELSE
   END DO
 END IF
 dI = I*(q/q_new - 1.0_r8)
+IF(PRESENT(q_raw))dI = dI + wr*MIN(I*(q_raw/q_s - 1.0_r8) - dI, 0.0_r8)
 CALL gradient_(n, A, dI, dj, ierr, edge_order=1)
 IF(ierr /= 0)THEN
   q_new = q; wr = 0.0_r8
