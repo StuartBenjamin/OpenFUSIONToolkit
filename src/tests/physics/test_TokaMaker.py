@@ -842,7 +842,7 @@ def run_ITER_case(mesh_resolution,fe_orders,test_type,helicity,mp_q):
         del mygs_last
     # Save equilibrium to gEQDSK and i-file format
     mygs.save_eqdsk('tokamaker.eqdsk',nr=64,nz=64,lcfs_pad=0.001)
-    mygs.save_ifile('tokamaker.ifile',npsi=64,ntheta=64,lcfs_pad=0.001)
+    mygs.save_ifile('tokamaker.ifile',npsi=64,ntheta=64,lcfs_pad=0.001,theta_sampling='uniform')
     mygs.save_ifile('tokamaker_ext.ifile',npsi=64,ntheta=64,lcfs_pad=0.001,profile_derivs=True,psi_bounds=True)
     eq_info.update(ifile_errors(mygs,'tokamaker_ext.ifile'))
     mygs.save_ifile('tokamaker_axis.ifile',npsi=64,ntheta=64,lcfs_pad=0.001,psi_bounds=True,profile_derivs=True,axis_pack=1.E-4)
