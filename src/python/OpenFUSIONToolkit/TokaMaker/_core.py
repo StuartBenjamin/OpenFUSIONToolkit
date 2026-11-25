@@ -144,6 +144,7 @@ _BOOT_OPS_DEFAULTS = {
     'saw_rule': 2,
     'saw_drop': 0.0,
     'saw_width': 0.0,
+    'saw_shear': 0.0,
     'bs_interp': 2,
 }
 ## Names of the `bs_interp` codes 1, 2, 3 (see @ref TokaMaker.TokaMaker_equilibrium.set_boot_ops "set_boot_ops")
@@ -1027,7 +1028,7 @@ class TokaMaker():
     def set_boot_ops(self, isolate_edge_jbs=None, scale_jbs=None, djbs_tol=None,
                      diagnose_bs=None, taper_edge_jphi=None, taper_edge_psi0=None, taper_edge_shape=None,
                      saw_q_s=None, saw_dq=None, saw_tol=None, saw_relax=None, saw_ramp=None, saw_rule=None,
-                     bs_interp=None, saw_drop=None, saw_width=None):
+                     bs_interp=None, saw_drop=None, saw_width=None, saw_shear=None):
         r'''! Set bootstrap current options for the jphi-split-bootstrap current profile update
 
         See @ref TokaMaker.TokaMaker_equilibrium.set_boot_ops "set_boot_ops"
@@ -1038,7 +1039,7 @@ class TokaMaker():
                                                diagnose_bs,
                                                taper_edge_jphi, taper_edge_psi0, taper_edge_shape,
                                                saw_q_s, saw_dq, saw_tol, saw_relax, saw_ramp, saw_rule,
-                                               bs_interp, saw_drop, saw_width)
+                                               bs_interp, saw_drop, saw_width, saw_shear)
 
     def get_boot_profs(self):
         r'''! Get the current profiles of the last G-S solve with a `jphi-split-bootstrap` current profile
@@ -2551,7 +2552,7 @@ class TokaMaker():
         @param saw_q_s Sawtooth reset q floor; 0 = off (default: 0). The q of
           \f$\alpha j_{ind} + j_{BS} + j_{fixed} + j_{saw,in}\f$ in the traced geometry is reset where it dips
           below q_s (``saw_rule``); the Ip-neutral current that does this is added to ``jphi_saw``
-        @param saw_dq, saw_tol, saw_relax, saw_ramp, saw_rule, saw_drop, saw_width, bs_interp See ``set_boot_ops()``
+        @param saw_dq, saw_tol, saw_relax, saw_ramp, saw_rule, saw_drop, saw_width, saw_shear, bs_interp See ``set_boot_ops()``
 
         @result Dictionary with 1-D numpy array values (A/m² unless noted). All current densities, inputs
           included, are TokaMaker \f$j_\phi = \langle j_\phi \rangle = \langle R \rangle P' + \langle 1/R \rangle FF'/\mu_0\f$
@@ -3200,7 +3201,7 @@ class TokaMaker_equilibrium():
     def set_boot_ops(self, isolate_edge_jbs=None, scale_jbs=None, djbs_tol=None,
                      diagnose_bs=None, taper_edge_jphi=None, taper_edge_psi0=None, taper_edge_shape=None,
                      saw_q_s=None, saw_dq=None, saw_tol=None, saw_relax=None, saw_ramp=None, saw_rule=None,
-                     bs_interp=None, saw_drop=None, saw_width=None):
+                     bs_interp=None, saw_drop=None, saw_width=None, saw_shear=None):
         r'''! Set bootstrap current options for the jphi-split-bootstrap current profile update.
 
         Call after setting a `jphi-split-bootstrap`-type ffp_prof profile, and before mygs.solve().
@@ -3219,7 +3220,10 @@ class TokaMaker_equilibrium():
         @param saw_relax Under-relaxation of the jphi_saw update. (Internal default: 1)
         @param saw_ramp Reset weight ramps over this q deficit below saw_q_s; 0 = hard trigger. (Internal default: 0.01)
         @param saw_rule Reset rule: 1 = fuse (FUSE's saw_crash!: q reset from the axis out to the sawtooth radius);
-          2 = local (each dip below saw_q_s raised about its q minimum, current moved only inside it). (Internal default: 2)
+          2 = local (each dip below saw_q_s raised about its q minimum, current moved only inside it);
+          3 = shear floor (each dip below saw_q_s held at or above a floor rising from saw_q_s at its start, the axis or
+          its inner saw_q_s crossing, with dq/drho ramping to saw_shear over saw_width, until the base q is back above it;
+          C2 joins about saw_width wide, the current outside kept). (Internal default: 2)
         @param bs_interp Interpolation of the profiles in the bootstrap update: the kinetic profiles and P onto the
           ffp_prof nodes and P' there (solve_bootstrap), the kinetic gradients of the bootstrap current and the
           sawtooth reset between its nodes. 'linterp': piecewise linear, finite-difference derivatives; 'hermite':
@@ -3227,7 +3231,9 @@ class TokaMaker_equilibrium():
         @param saw_drop, saw_width Rule 2 with saw_width > 0 (0 < saw_drop < saw_width, in rho = sqrt(Phi_N)): each dip is
           reset on the current instead, flat over a band about the q minimum (from the axis if the dip holds it), leaving it
           within saw_drop and rejoining the base current within saw_width with continuous gradient, the current outside kept
-          and q >= saw_q_s. (Internal default: 0, the q-target reset)
+          and q >= saw_q_s. (Internal default: 0, the q-target reset). Rule 3: saw_width > 0 is the width of the floor's
+          slope ramp and joins, saw_drop 0.
+        @param saw_shear Rule 3: minimum dq/drho (rho = sqrt(Phi_N)) of the q floor. (Internal default: 0)
         '''
         if bs_interp is not None:
             if bs_interp not in _BS_INTERP_NAMES:
@@ -3240,14 +3246,19 @@ class TokaMaker_equilibrium():
                          ('taper_edge_psi0', taper_edge_psi0), ('taper_edge_shape', taper_edge_shape),
                          ('saw_q_s', saw_q_s), ('saw_dq', saw_dq), ('saw_tol', saw_tol), ('saw_relax', saw_relax),
                          ('saw_ramp', saw_ramp), ('saw_rule', saw_rule), ('bs_interp', bs_interp),
-                         ('saw_drop', saw_drop), ('saw_width', saw_width)):
+                         ('saw_drop', saw_drop), ('saw_width', saw_width), ('saw_shear', saw_shear)):
             if val is not None:
                 self._boot_ops[key] = type(_BOOT_OPS_DEFAULTS[key])(val)
         if self._boot_ops['saw_q_s'] < 0.0 or self._boot_ops['saw_dq'] <= 0.0 or not (0.0 < self._boot_ops['saw_relax'] <= 1.0) \
-                or self._boot_ops['saw_ramp'] < 0.0 or self._boot_ops['saw_rule'] not in (1, 2):
-            raise ValueError("saw options: need saw_q_s >= 0, saw_dq > 0, 0 < saw_relax <= 1, saw_ramp >= 0, saw_rule in (1, 2)")
-        if self._boot_ops['saw_width'] != 0.0 and not (0.0 < self._boot_ops['saw_drop'] < self._boot_ops['saw_width']
-                                                       and self._boot_ops['saw_rule'] == 2):
+                or self._boot_ops['saw_ramp'] < 0.0 or self._boot_ops['saw_rule'] not in (1, 2, 3):
+            raise ValueError("saw options: need saw_q_s >= 0, saw_dq > 0, 0 < saw_relax <= 1, saw_ramp >= 0, saw_rule in (1, 2, 3)")
+        if self._boot_ops['saw_rule'] == 3:
+            if not (self._boot_ops['saw_width'] > 0.0 and self._boot_ops['saw_drop'] == 0.0 and self._boot_ops['saw_shear'] >= 0.0):
+                raise ValueError("saw_rule 3 needs saw_width > 0, saw_drop 0 and saw_shear >= 0")
+        elif self._boot_ops['saw_shear'] != 0.0:
+            raise ValueError("saw_shear needs saw_rule 3")
+        elif self._boot_ops['saw_width'] != 0.0 and not (0.0 < self._boot_ops['saw_drop'] < self._boot_ops['saw_width']
+                                                         and self._boot_ops['saw_rule'] == 2):
             raise ValueError("saw_width > 0 needs 0 < saw_drop < saw_width and saw_rule 2")
         if self._boot_ops['taper_edge_shape'] not in (1, 2, 3) or not (0.0 < self._boot_ops['taper_edge_psi0'] < 1.0):
             raise ValueError("taper options: need taper_edge_shape in (1, 2, 3) and 0 < taper_edge_psi0 < 1")

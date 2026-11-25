@@ -44,8 +44,11 @@ class tokamaker_boot_ops_struct(c_struct):
      - `saw_tol` Threshold on relative change in jphi_saw to freeze it (default 1e-4)
      - `saw_relax` Under-relaxation of the jphi_saw update (default 1)
      - `saw_ramp` Reset weight ramps over this q deficit below saw_q_s; 0 = hard trigger (default 0.01)
-     - `saw_rule` Reset rule: 1 fuse (axis to the sawtooth radius, FUSE's saw_crash!), 2 local (each dip, two-sided; default)
-     - `saw_drop`, `saw_width` Rule 2: drop-off and rejoin widths (rho) of the current-blend reset (saw_width 0: off)
+     - `saw_rule` Reset rule: 1 fuse (axis to the sawtooth radius, FUSE's saw_crash!), 2 local (each dip, two-sided; default),
+       3 shear floor (each dip, q >= saw_q_s with slope >= saw_shear)
+     - `saw_drop`, `saw_width` Rule 2: drop-off and rejoin widths (rho) of the current-blend reset (saw_width 0: off);
+       rule 3: saw_width is the width (rho) of the floor's slope ramp and joins
+     - `saw_shear` Rule 3: minimum dq/drho of the q floor
      - `bs_interp` Profile interpolation in the bootstrap update: 1 linterp, 2 hermite (pchip; default), 3 cubic (C2)
     '''
     _fields_ = [('isolate_edge_jbs', c_bool),
@@ -63,6 +66,7 @@ class tokamaker_boot_ops_struct(c_struct):
                 ('saw_rule', c_int),
                 ('saw_drop', c_double),
                 ('saw_width', c_double),
+                ('saw_shear', c_double),
                 ('bs_interp', c_int)]
 
 # tokamaker_alloc(tMaker_ptr,mesh_ptr,error_str)
@@ -129,11 +133,11 @@ tokamaker_get_boot_prof = ctypes_subroutine(oftpy_lib.tokamaker_get_boot_prof,
 tokamaker_get_boot_saw = ctypes_subroutine(oftpy_lib.tokamaker_get_boot_saw,
     [c_void_p, c_double_ptr, c_double_ptr, c_int_ptr, c_char_p])
 
-# tokamaker_saw_reset_1d(n,rho,q,itor,area,c1,q_s,dq,ramp,rule,drop,width,q_new,dj,wr,scal,ierr,q_raw)
+# tokamaker_saw_reset_1d(n,rho,q,itor,area,c1,q_s,dq,ramp,rule,drop,width,shear,q_new,dj,wr,scal,ierr,q_raw)
 tokamaker_saw_reset_1d = ctypes_subroutine(oftpy_lib.tokamaker_saw_reset_1d,
     [c_int, ctypes_numpy_array(numpy.float64,1), ctypes_numpy_array(numpy.float64,1), ctypes_numpy_array(numpy.float64,1),
      ctypes_numpy_array(numpy.float64,1), ctypes_numpy_array(numpy.float64,1), c_double, c_double, c_double, c_int,
-     c_double, c_double,
+     c_double, c_double, c_double,
      ctypes_numpy_array(numpy.float64,1), ctypes_numpy_array(numpy.float64,1), ctypes_numpy_array(numpy.float64,1),
      ctypes_numpy_array(numpy.float64,1), c_int_ptr, c_void_p])
 

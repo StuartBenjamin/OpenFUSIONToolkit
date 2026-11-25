@@ -1357,11 +1357,13 @@ def solve_with_bootstrap(mygs,
                              scale_Ip=final_scale_Ip)
 
 
-def _saw_reset_1d(rho, q, itor, area, c1, q_s, dq=0.03, ramp=0.01, rule=2, drop=0.0, width=0.0, q_raw=None):
+def _saw_reset_1d(rho, q, itor, area, c1, q_s, dq=0.03, ramp=0.01, rule=2, drop=0.0, width=0.0, q_raw=None, shear=0.0):
     r'''! Fortran 1-D sawtooth q reset (grad_shaf_bootstrap::saw_reset_1d) on given profiles, axis first
 
-    @param rule 1 = fuse (axis to rho_m), 2 = local (each dip, two-sided)
-    @param drop, width Rule 2: drop-off and rejoin widths of the current-blend reset (width 0 = q-target reset)
+    @param rule 1 = fuse (axis to rho_m), 2 = local (each dip, two-sided), 3 = shear floor
+    @param drop, width Rule 2: drop-off and rejoin widths of the current-blend reset (width 0 = q-target reset);
+      rule 3: width is the width of the floor's slope ramp and joins
+    @param shear Rule 3: minimum dq/drho of the floor
     @param q_raw Unsmoothed base q (`q` smoothed), also held >= q_s (optional)
     @result (q_new, dj, dict(rho_s, rho_m, rho_out, n_dips, w, wr, ierr)); dj in the units of itor/area divided by c1,
       wr the per-node reset weight, ierr nonzero if the reset failed (then q_new = q and dj = 0)
@@ -1375,6 +1377,6 @@ def _saw_reset_1d(rho, q, itor, area, c1, q_s, dq=0.03, ramp=0.01, rule=2, drop=
     q_new, dj, wr, scal = numpy.zeros(n), numpy.zeros(n), numpy.zeros(n), numpy.zeros(5)
     ierr = c_int()
     tokamaker_saw_reset_1d(n, *arrs, float(q_s), float(dq), float(ramp), int(rule), float(drop), float(width),
-                           q_new, dj, wr, scal, ctypes.byref(ierr), None if q_raw is None else q_raw.ctypes.data)
+                           float(shear), q_new, dj, wr, scal, ctypes.byref(ierr), None if q_raw is None else q_raw.ctypes.data)
     return q_new, dj, {'rho_s': scal[0], 'rho_m': scal[1], 'rho_out': scal[4], 'n_dips': int(scal[2]), 'w': scal[3], 'wr': wr,
                        'ierr': ierr.value}

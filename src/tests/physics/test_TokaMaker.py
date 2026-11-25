@@ -2225,6 +2225,12 @@ def run_ITER_bootstrap_saw_internal(mesh_resolution, fe_order, mp_q):
             pass
         else:
             raise AssertionError("bs_interp='akima' accepted")
+        # (i) shear floor (rule 3) on the reversed-shear dip of (f), per dip like local: q0 kept, min q at q_s
+        mygs.boot_reset()
+        p_3 = mygs.solve_bootstrap(saw_q_s=q_s, saw_rule=3, saw_width=0.1, saw_shear=0.3, **common)
+        q_3 = mygs.get_q(npsi=100)[1]
+        if not sum_ok(p_3) or p_3['saw_n_dips'] != 1 or abs(np.min(q_3) - q_s) > 0.01 or q_3[0] < q_base[0] - 0.01:
+            raise AssertionError("shear floor: sum / n_dips / min q / q0 wrong")
     except Exception as e:
         print(e)
         mp_q.put(None)
@@ -2250,7 +2256,7 @@ def run_saw_reset_1d(mp_q):
 
 
 def test_saw_reset_1d():
-    '''1-D sawtooth reset on a cylinder (I = rho^2/q, A = rho^2): rule 1 (fuse) and rule 2 (local)'''
+    '''1-D sawtooth reset on a cylinder (I = rho^2/q, A = rho^2): rule 1 (fuse), rule 2 (local) and rule 3 (shear floor)'''
     result = mp_run(run_saw_reset_1d, (), timeout=60)
     assert result == 'ok', result
 
@@ -2375,6 +2381,23 @@ def _check_saw_reset_1d():
         assert np.abs(dI[r >= sc_b['rho_out']]).max() < 1e-12*np.abs(dI).max() and jump2 < 0.6*jump
     jp = [blend(nr, lambda r: q_s - 0.006 + 2.5*r**2, raw=0.004)[-1] for nr in (201, 401)]
     assert jp[1] < 0.6*jp[0]
+    # Shear floor (rule 3), on-axis and off-axis dip: min q = q_s at the floor's start r_in, q only raised,
+    # dq/drho >= saw_shear from r_in + width (r_in at or inside the first node below q_s) to rho_out, q unchanged
+    # from rho_out on (Ip kept), and the reset
+    # current's gradient continuous (its largest node-to-node change halves with the spacing)
+    def floor(nr, qf):
+        r = np.linspace(0.0, 1.0, nr)
+        qb = qf(r)
+        q_f, dj_f, sc_f = _saw_reset_1d(r, qb, r**2/qb, r**2, np.ones(nr), q_s, dq, rule=3, width=0.1, shear=0.3)
+        jump = np.abs(np.diff(np.diff(dj_f)/np.diff(r)))[(r[1:-1] > 0.02) & (r[1:-1] < 0.9)].max()
+        return r, qb, q_f, sc_f, jump
+    for qf in (lambda r: 0.9 + 2.5*r**2, lambda r: 1.10 + 0.6*r**2 - 0.3*np.exp(-((r - 0.35)/0.08)**2)):
+        (r, qb, q_f, sc_f, jump), jump2 = floor(401, qf), floor(801, qf)[-1]
+        mid = 0.5*(r[1:] + r[:-1])
+        act = (mid > r[np.argmax(qb < q_s)] + 0.1) & (mid < sc_f['rho_out'])
+        assert sc_f['n_dips'] == 1 and q_s - 1e-12 <= q_f.min() < q_s + 2e-3 and np.all(q_f >= qb)
+        assert np.all(np.diff(q_f)[act]/np.diff(r)[act] >= 0.3 - 1e-9) and np.any(act)
+        assert np.all(q_f[r >= sc_f['rho_out']] == qb[r >= sc_f['rho_out']]) and jump2 < 0.6*jump
 
 # -----------------------------------------------------------------------
 # Test: profiles on normalized toroidal flux (coord='phi_n')

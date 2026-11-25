@@ -46,9 +46,12 @@ TYPE :: boot_ops
   REAL(r8) :: saw_tol = 1.0e-4_r8 !< Rel. change in jphi_saw (vs RMS total) below which jphi_saw is frozen
   REAL(r8) :: saw_relax = 1.0_r8 !< Under-relaxation of the jphi_saw update (1 = none)
   REAL(r8) :: saw_ramp = 0.01_r8 !< Reset weight ramps over this q deficit below saw_q_s (0 = hard trigger)
-  INTEGER(i4) :: saw_rule = 2 !< Reset rule: 1 = fuse (axis to rho_m, FUSE saw_crash!), 2 = local (each dip, two-sided)
+  INTEGER(i4) :: saw_rule = 2 !< Reset rule: 1 = fuse (axis to rho_m, FUSE saw_crash!), 2 = local (each dip, two-sided),
+                              !! 3 = shear floor (each dip, q >= saw_q_s with slope >= saw_shear)
   REAL(r8) :: saw_drop = 0.0_r8 !< Rule 2: width in rho over which the reset current leaves its flat band
-  REAL(r8) :: saw_width = 0.0_r8 !< Rule 2: width in rho over which it rejoins the base (0 = q-target reset)
+  REAL(r8) :: saw_width = 0.0_r8 !< Rule 2: width in rho over which it rejoins the base (0 = q-target reset);
+                                 !! rule 3: width in rho of the floor's slope ramp and joins
+  REAL(r8) :: saw_shear = 0.0_r8 !< Rule 3: minimum dq/drho of the q floor
   INTEGER(i4) :: bs_interp = 2 !< Kinetic gradients and sawtooth-reset interpolation (@ref node_slopes): 1 = linterp
                                !! (finite differences, piecewise linear), 2 = hermite (pchip), 3 = cubic (C2 spline)
 END TYPE boot_ops
@@ -163,6 +166,7 @@ IF(self%boot_ops%initialized)THEN
   CALL hdf5_write(self%boot_ops%saw_rule,filename,path//'/BOOT_OPS/SAW_RULE')
   CALL hdf5_write(self%boot_ops%saw_drop,filename,path//'/BOOT_OPS/SAW_DROP')
   CALL hdf5_write(self%boot_ops%saw_width,filename,path//'/BOOT_OPS/SAW_WIDTH')
+  CALL hdf5_write(self%boot_ops%saw_shear,filename,path//'/BOOT_OPS/SAW_SHEAR')
   CALL hdf5_write(self%boot_ops%bs_interp,filename,path//'/BOOT_OPS/BS_INTERP')
 END IF
 CALL boot_profs_save(self%boot_profs,filename,path//'/BOOT_PROFS')
@@ -240,6 +244,8 @@ IF(hdf5_field_exist(filename,path//'/BOOT_OPS'))THEN
     CALL hdf5_read(self%boot_ops%saw_drop,filename,path//'/BOOT_OPS/SAW_DROP',success=success)
     CALL hdf5_read(self%boot_ops%saw_width,filename,path//'/BOOT_OPS/SAW_WIDTH',success=success)
   END IF
+  IF(hdf5_field_exist(filename,path//'/BOOT_OPS/SAW_SHEAR')) &
+    CALL hdf5_read(self%boot_ops%saw_shear,filename,path//'/BOOT_OPS/SAW_SHEAR',success=success)
   IF(hdf5_field_exist(filename,path//'/BOOT_OPS/BS_INTERP')) &
     CALL hdf5_read(self%boot_ops%bs_interp,filename,path//'/BOOT_OPS/BS_INTERP',success=success)
   self%boot_ops%initialized = .TRUE.
@@ -946,7 +952,7 @@ qr(1:nk) = qb(1:nk)
 CALL quad_smooth(nk, rho(kk(1:nk)), qb(1:nk), saw_nsmooth)
 CALL saw_reset_1d(nk, rho(kk(1:nk)), qb(1:nk), Ib(kk(1:nk)), Ar(kk(1:nk)), c1(kk(1:nk)), &
                   self%boot_ops%saw_q_s, self%boot_ops%saw_dq, self%boot_ops%saw_ramp, &
-                  self%boot_ops%saw_rule, self%boot_ops%saw_drop, self%boot_ops%saw_width, &
+                  self%boot_ops%saw_rule, self%boot_ops%saw_drop, self%boot_ops%saw_width, self%boot_ops%saw_shear, &
                   qn(1:nk), djr(1:nk), wr(1:nk), rho_s, rho_m, rho_out, n_dips, w, ierr, qr(1:nk))
 IF(ierr /= 0)THEN
   CALL oft_warn('saw_redistribute: sawtooth reset failed, keeping the last reset this update')
@@ -955,7 +961,7 @@ END IF
 !---Reset interpolated in rho (as set by bs_interp, @ref nodes_interp); inside the
 !   reset the base structure between kept nodes is reset too (target total = base + reset is
 !   interpolated), weighted by the reset weight (rule 1: w inside rho_m, a sharp cut as in FUSE;
-!   rule 2: wr interpolated) so it vanishes with the reset
+!   rules 2, 3: wr interpolated) so it vanishes with the reset
 DO i = 1, nk
   phi(i) = j_base(n+1-kk(i))
 END DO
@@ -1109,11 +1115,13 @@ END SUBROUTINE quad_smooth
 !! rule 2 (local): each q < q_s + dq interval holding a q < q_s point is reset about its q minimum,
 !! weighted per interval (@ref local_reset); q is unchanged elsewhere, so dI = 0 at interval ends.
 !! rule 2 with `width` > 0: each interval is reset on the current instead (@ref band_reset), with C2 joins.
+!! rule 3 (shear floor): each q < q_s region holds q at or above a floor rising from q_s with slope `shear`,
+!! out to where the base q is back above it (@ref floor_reset), weighted as rule 1.
 !! dI = I*(q/q_new - 1) (with q_raw, lowered where a q-target reset acts until q_raw*I/(I + dI) >= q_s; the
 !! current-blend reset holds min(q, q_raw) itself), dj = (d dI/dA)/c1.
 !---------------------------------------------------------------------------------
-SUBROUTINE saw_reset_1d(n, rho, q, I, A, c1, q_s, dq, ramp, rule, drop, width, q_new, dj, wr, rho_s, rho_m, rho_out, &
-                        n_dips, w, ierr, q_raw)
+SUBROUTINE saw_reset_1d(n, rho, q, I, A, c1, q_s, dq, ramp, rule, drop, width, shear, q_new, dj, wr, rho_s, rho_m, &
+                        rho_out, n_dips, w, ierr, q_raw)
 INTEGER(i4), INTENT(in) :: n
 REAL(r8), INTENT(in) :: rho(n) !< Radius, ascending from the axis
 REAL(r8), INTENT(in) :: q(n) !< Base q
@@ -1121,9 +1129,11 @@ REAL(r8), INTENT(in) :: I(n) !< Enclosed current
 REAL(r8), INTENT(in) :: A(n) !< Enclosed area
 REAL(r8), INTENT(in) :: c1(n) !< d(jtor)/d(jphi)
 REAL(r8), INTENT(in) :: q_s, dq, ramp
-INTEGER(i4), INTENT(in) :: rule !< 1 = fuse, 2 = local
+INTEGER(i4), INTENT(in) :: rule !< 1 = fuse, 2 = local, 3 = shear floor
 REAL(r8), INTENT(in) :: drop !< Rule 2, `width` > 0: width in rho over which the current leaves the flat band
-REAL(r8), INTENT(in) :: width !< Rule 2: width in rho over which the current rejoins the base (0 = q-target reset)
+REAL(r8), INTENT(in) :: width !< Rule 2: width in rho over which the current rejoins the base (0 = q-target reset);
+                              !! rule 3 (> 0): width in rho of the floor's slope ramp and joins
+REAL(r8), INTENT(in) :: shear !< Rule 3: minimum dq/drho of the floor
 REAL(r8), INTENT(out) :: q_new(n), dj(n), wr(n), rho_s, rho_m, rho_out, w
 INTEGER(i4), INTENT(out) :: n_dips
 INTEGER(i4), INTENT(out) :: ierr !< 0 on success, -1 if a gradient failed (no reset: q_new = q, dj = 0)
@@ -1170,6 +1180,8 @@ IF(rule == 1)THEN
     rho_out = rho_m
     WHERE(rho < rho_m)wr = w
   END IF
+ELSE IF(rule == 3)THEN
+  CALL floor_reset
 ELSE
   IF(width > 0.0_r8)THEN
     !---Current-blend resets: base jphi jb, current jphi jc and enclosed-current change dIc so far, floor q ql
@@ -1360,6 +1372,78 @@ REAL(r8) :: s
 s = MIN(MAX(t, 0.0_r8), 1.0_r8)
 s = s**3*(10.0_r8 - 15.0_r8*s + 6.0_r8*s**2)
 END FUNCTION smooth_step
+!---Shear-floor reset (rule 3). Each q < q_s region, from its start r_in (the axis, or its inner q_s crossing), gets
+!   the floor L = q_s + shear*floor_ramp(rho - r_in) and the target max(q, L), joined by a C2 smooth maximum of scale
+!   d (about `width` in rho at the gentler of the two joins) from where q is d above q_s inside to where it is d above
+!   L outside (dips before that lie under L). Weighted by the trigger ramp from the lowest q, as rule 1.
+SUBROUTINE floor_reset
+INTEGER(i4) :: k, j, i0, i1, kk
+REAL(r8) :: r_in, g_in, d, L(n), e(n)
+w = 1.0_r8
+IF(ramp > 0.0_r8)w = MIN(MAX((q_s - MINVAL(q))/ramp, 0.0_r8), 1.0_r8)
+qt = q
+k = 1
+DO WHILE(k <= n)
+  IF(q(k) >= q_s)THEN
+    k = k + 1
+    CYCLE
+  END IF
+  r_in = 0.0_r8; g_in = HUGE(1.0_r8)
+  IF(k > 1)THEN
+    r_in = rho(k-1) + (q_s - q(k-1))/(q(k) - q(k-1))*(rho(k) - rho(k-1))
+    g_in = (q(k-1) - q(k))/(rho(k) - rho(k-1))
+  END IF
+  DO kk = 1, n
+    L(kk) = q_s + shear*floor_ramp(rho(kk) - r_in)
+  END DO
+  e = q - L
+  !---Catch (first node back on the floor) and reach (first node d above it); none: no reset from here on
+  j = k
+  DO WHILE(e(j) < 0.0_r8)
+    j = j + 1
+    IF(j > n)EXIT
+  END DO
+  IF(j > n)EXIT
+  d = 0.5_r8*width*MIN(g_in, (e(j) - e(j-1))/(rho(j) - rho(j-1)))
+  i1 = j
+  DO WHILE(e(i1) < d)
+    i1 = i1 + 1
+    IF(i1 > n)EXIT
+  END DO
+  IF(i1 > n)EXIT
+  i0 = MAX(k - 1, 1)
+  DO WHILE(i0 > 1 .AND. qt(i0) - q_s < d)
+    i0 = i0 - 1
+  END DO
+  DO kk = i0, i1
+    qt(kk) = smooth_max(qt(kk), L(kk), d)
+  END DO
+  wr(i0:i1) = w
+  n_dips = n_dips + 1
+  rho_out = rho(i1)
+  k = i1 + 1
+END DO
+IF(n_dips == 0)w = 0.0_r8
+q_new = q + w*(qt - q)
+END SUBROUTINE floor_reset
+!---Integral of smooth_step(t/width) from 0 (0 for t <= 0): slope 0 -> 1 over width, C2
+PURE FUNCTION floor_ramp(t) RESULT(r)
+REAL(r8), INTENT(in) :: t
+REAL(r8) :: r, u
+u = MIN(MAX(t/width, 0.0_r8), 1.0_r8)
+r = width*u**4*(2.5_r8 + u*(u - 3.0_r8)) + MAX(t - width, 0.0_r8)
+END FUNCTION floor_ramp
+!---C2 smooth maximum: max(a, b) where |a - b| >= d, above both (by up to 3d/8) within
+PURE FUNCTION smooth_max(a, b, d) RESULT(m)
+REAL(r8), INTENT(in) :: a, b, d
+REAL(r8) :: m, x
+x = (a - b)/d
+IF(ABS(x) >= 1.0_r8)THEN
+  m = MAX(a, b)
+ELSE
+  m = 0.5_r8*(a + b) + 0.0625_r8*d*(3.0_r8 + x**2*(6.0_r8 - x**2))
+END IF
+END FUNCTION smooth_max
 !---Local reset of interval [ia_, ib_] (q < q_s + dq, ib_ < n). Humps (q maxima) split it into segments:
 !   between two q < q_s runs the highest point of the gap, between a run and an interval end its highest
 !   interior local maximum. The merged reset (one centre, interval ends) blends into the split one (each
