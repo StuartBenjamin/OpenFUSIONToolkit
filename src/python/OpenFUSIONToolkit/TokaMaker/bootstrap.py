@@ -1357,7 +1357,7 @@ def solve_with_bootstrap(mygs,
                              scale_Ip=final_scale_Ip)
 
 
-def _saw_reset_1d(rho, q, itor, area, c1, q_s, dq=0.03, ramp=0.01, rule=2, drop=0.0, width=0.0, q_raw=None, shear=0.0):
+def _saw_reset_1d(rho, q, itor, area, c1, q_s, dq=0.03, ramp=0.01, rule=2, drop=0.0, width=0.0, shear=0.0, q_raw=None):
     r'''! Fortran 1-D sawtooth q reset (grad_shaf_bootstrap::saw_reset_1d) on given profiles, axis first
 
     @param rule 1 = fuse (axis to rho_m), 2 = local (each dip, two-sided), 3 = shear floor

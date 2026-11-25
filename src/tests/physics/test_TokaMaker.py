@@ -2383,8 +2383,8 @@ def _check_saw_reset_1d():
     assert jp[1] < 0.6*jp[0]
     # Shear floor (rule 3), on-axis and off-axis dip: min q = q_s at the floor's start r_in, q only raised,
     # dq/drho >= saw_shear from r_in + width (r_in at or inside the first node below q_s) to rho_out, q unchanged
-    # from rho_out on (Ip kept), and the reset
-    # current's gradient continuous (its largest node-to-node change halves with the spacing)
+    # from rho_out on (Ip kept), and the reset current's gradient continuous (its largest node-to-node change halves
+    # with the spacing)
     def floor(nr, qf):
         r = np.linspace(0.0, 1.0, nr)
         qb = qf(r)

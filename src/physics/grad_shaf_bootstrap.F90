@@ -1433,7 +1433,7 @@ REAL(r8) :: r, u
 u = MIN(MAX(t/width, 0.0_r8), 1.0_r8)
 r = width*u**4*(2.5_r8 + u*(u - 3.0_r8)) + MAX(t - width, 0.0_r8)
 END FUNCTION floor_ramp
-!---C2 smooth maximum: max(a, b) where |a - b| >= d, above both (by up to 3d/8) within
+!---C2 smooth maximum: max(a, b) where |a - b| >= d, above both (by up to 3d/16) within
 PURE FUNCTION smooth_max(a, b, d) RESULT(m)
 REAL(r8), INTENT(in) :: a, b, d
 REAL(r8) :: m, x
