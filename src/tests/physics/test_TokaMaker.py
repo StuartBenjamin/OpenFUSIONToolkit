@@ -2183,12 +2183,13 @@ def run_ITER_bootstrap_saw_internal(mesh_resolution, fe_order, mp_q):
         if not (0.1 < rho_in < p_l['saw_rho_out']) or np.max(np.abs(p_l['jphi_saw'][away])) > 1e-3*np.max(np.abs(p_l['jphi_saw'])):
             raise AssertionError("saw reversed shear: local j_saw not confined to [rho_in, rho_out]")
         # (g) a loaded bootstrap state is re-solvable as saved: the same positional call after loading
-        #     reproduces the call with every keyword input and option passed explicitly
+        #     reproduces the call with every keyword input and option passed explicitly (the reset here is the
+        #     current blend, saw_width > 0, on the off-axis dip of (f): it holds q >= q_s)
         eC = 1.602176634e-19
         p_kin = eC*(setup['ne']*setup['Te'] + setup['ni']*setup['Ti'])
         kw = dict(jphi_fixed_prof={'x': psi_sample, 'y': 0.5*bump}, jphi_saw_prof={'x': psi_sample, 'y': 0.5*bump},
                   p_fixed_prof={'x': psi_sample, 'y': p_kin[0]*(0.1*np.exp(-((psi_sample - 0.3)/0.15)**2) + 1.0e-3)},
-                  saw_q_s=q_s, saw_dq=dq, saw_rule=2, taper_edge_jphi=True)
+                  saw_q_s=q_s, saw_dq=dq, saw_rule=2, saw_drop=0.04, saw_width=0.3, taper_edge_jphi=True)
         mygs.solve_bootstrap(**kw, **common)
         mygs._tMaker_equil.save_TokaMaker('ITER_boot_state.h5')
         mygs.boot_reset()
@@ -2197,6 +2198,8 @@ def run_ITER_bootstrap_saw_internal(mesh_resolution, fe_order, mp_q):
         mygs.boot_reset()
         mygs.replace_eq(source_file='ITER_boot_state.h5')
         p_expl = mygs.solve_bootstrap(**kw, **common)
+        if np.min(mygs.get_q(npsi=100)[1]) < q_s - 1e-3:
+            raise AssertionError("current-blend reset: min q below q_s")
         for key in ('jphi_total', 'jphi_ind', 'jphi_bs', 'jphi_fixed', 'jphi_saw', 'jphi_pd'):
             if not close(p_kept[key], p_expl[key], 1e-10):
                 raise AssertionError(f"loaded state: '{key}' differs from the explicit call")
@@ -2354,6 +2357,24 @@ def _check_saw_reset_1d():
             nj.append(np.sqrt(np.trapezoid(reset(qd, rule)[1]**2, A)))
         norms[rule] = np.abs(np.diff(nj)).max() / np.max(nj)
     assert norms[1] > 0.5 and norms[2] < 0.05
+    # Current blend (rule 2, width > 0), on-axis and off-axis dip: min q = q_s, no enclosed-current change from
+    # rho_out on (Ip kept), and the reset current's gradient continuous: its largest node-to-node change halves
+    # with the spacing (it stays O(1) at the q-target reset's joins); also at a partial trigger weight with an
+    # unsmoothed q_raw below q near the axis (the raw-q clamp is off on the band's nodes)
+    def blend(nr, qf, raw=0.0):
+        r = np.linspace(0.0, 1.0, nr)
+        qb = qf(r)
+        q_raw = qb - raw*np.exp(-(r/0.05)**2) if raw else None
+        q_b, dj_b, sc_b = _saw_reset_1d(r, qb, r**2/qb, r**2, np.ones(nr), q_s, dq, drop=0.04, width=0.3, q_raw=q_raw)
+        jump = np.abs(np.diff(np.diff(dj_b)/np.diff(r)))[(r[1:-1] > 0.02) & (r[1:-1] < 0.9)].max()
+        return r, qb, q_b, sc_b, jump
+    for qf in (lambda r: 0.9 + 2.5*r**2, lambda r: 1.10 + 0.6*r**2 - 0.17*np.exp(-((r - 0.35)/0.08)**2)):
+        (r, qb, q_b, sc_b, jump), jump2 = blend(201, qf), blend(401, qf)[-1]
+        dI = (r**2/qb)*(qb/q_b - 1.0)
+        assert sc_b['n_dips'] == 1 and np.isclose(q_b.min(), q_s, rtol=0.0, atol=1e-6) and q_b.min() > q_s - 1e-9
+        assert np.abs(dI[r >= sc_b['rho_out']]).max() < 1e-12*np.abs(dI).max() and jump2 < 0.6*jump
+    jp = [blend(nr, lambda r: q_s - 0.006 + 2.5*r**2, raw=0.004)[-1] for nr in (201, 401)]
+    assert jp[1] < 0.6*jp[0]
 
 # -----------------------------------------------------------------------
 # Test: profiles on normalized toroidal flux (coord='phi_n')

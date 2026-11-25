@@ -100,6 +100,8 @@ TYPE, BIND(C) :: tokamaker_boot_ops_type
   REAL(c_double)  :: saw_relax = 1.d0             !< Under-relaxation of jphi_saw
   REAL(c_double)  :: saw_ramp = 1.d-2             !< Reset weight ramp in q deficit (0 = hard trigger)
   INTEGER(c_int)  :: saw_rule = 2                 !< Reset rule: 1 fuse (axis to rho_m), 2 local (each dip, two-sided)
+  REAL(c_double)  :: saw_drop = 0.d0              !< Rule 2: drop-off width of the current-blend reset
+  REAL(c_double)  :: saw_width = 0.d0             !< Rule 2: rejoin width of the current-blend reset (0 = q-target reset)
   INTEGER(c_int)  :: bs_interp = 2                !< Kinetic gradients and sawtooth reset: 1 linterp, 2 hermite, 3 cubic
 END TYPE tokamaker_boot_ops_type
 !---------------------------------------------------------------------------------
@@ -658,6 +660,8 @@ TYPE IS (jphi_bs_flux_func)
   I%boot_ops%saw_relax = bops%saw_relax
   I%boot_ops%saw_ramp = bops%saw_ramp
   I%boot_ops%saw_rule = bops%saw_rule
+  I%boot_ops%saw_drop = bops%saw_drop
+  I%boot_ops%saw_width = bops%saw_width
   I%boot_ops%bs_interp = bops%bs_interp
 CLASS DEFAULT
   CALL copy_string('Run set_profiles with a jphi-split-bootstrap profile before calling set_boot_ops.',error_str)
@@ -694,6 +698,8 @@ TYPE IS (jphi_bs_flux_func)
   bops%saw_relax = I%boot_ops%saw_relax
   bops%saw_ramp = I%boot_ops%saw_ramp
   bops%saw_rule = I%boot_ops%saw_rule
+  bops%saw_drop = I%boot_ops%saw_drop
+  bops%saw_width = I%boot_ops%saw_width
   bops%bs_interp = I%boot_ops%bs_interp
 CLASS DEFAULT
   initialized = .FALSE. ! Not a bootstrap profile: no options
@@ -757,7 +763,7 @@ END SUBROUTINE tokamaker_get_boot_saw
 !> 1-D sawtooth q reset (@ref grad_shaf_bootstrap::saw_reset_1d) on given profiles, axis first.
 !! scal = [rho_s, rho_m, n_dips, w, rho_out]
 !---------------------------------------------------------------------------------
-SUBROUTINE tokamaker_saw_reset_1d(n,rho,q,itor,area,c1,q_s,dq,ramp,rule,q_new,dj,wr,scal,ierr) &
+SUBROUTINE tokamaker_saw_reset_1d(n,rho,q,itor,area,c1,q_s,dq,ramp,rule,drop,width,q_new,dj,wr,scal,ierr,q_raw) &
     BIND(C,NAME="tokamaker_saw_reset_1d")
 INTEGER(c_int), VALUE, INTENT(in) :: n !< Number of points
 REAL(c_double), INTENT(in) :: rho(n) !< Radius, ascending from the axis
@@ -769,13 +775,23 @@ REAL(c_double), VALUE, INTENT(in) :: q_s !< Reset q on axis
 REAL(c_double), VALUE, INTENT(in) :: dq !< Mixing radius offset
 REAL(c_double), VALUE, INTENT(in) :: ramp !< Trigger ramp
 INTEGER(c_int), VALUE, INTENT(in) :: rule !< Reset rule (1 fuse, 2 local)
+REAL(c_double), VALUE, INTENT(in) :: drop !< Rule 2: drop-off width of the current-blend reset
+REAL(c_double), VALUE, INTENT(in) :: width !< Rule 2: rejoin width of the current-blend reset (0 = q-target reset)
 REAL(c_double), INTENT(out) :: q_new(n) !< Reset q
 REAL(c_double), INTENT(out) :: dj(n) !< Reset current (jphi units of itor/area)
 REAL(c_double), INTENT(out) :: wr(n) !< Per-node reset weight
 REAL(c_double), INTENT(out) :: scal(5) !< rho_s, rho_m, n_dips, w, rho_out
 INTEGER(c_int), INTENT(out) :: ierr !< 0 on success, nonzero if the reset failed (no reset)
+TYPE(c_ptr), VALUE, INTENT(in) :: q_raw !< Unsmoothed base q (optional, C_NULL_PTR if absent)
 INTEGER(i4) :: n_dips
-CALL saw_reset_1d(n,rho,q,itor,area,c1,q_s,dq,ramp,rule,q_new,dj,wr,scal(1),scal(2),scal(5),n_dips,scal(4),ierr)
+REAL(8), POINTER, DIMENSION(:) :: q_raw_tmp
+IF(c_associated(q_raw))THEN
+  CALL c_f_pointer(q_raw, q_raw_tmp, [n])
+  CALL saw_reset_1d(n,rho,q,itor,area,c1,q_s,dq,ramp,rule,drop,width,q_new,dj,wr,scal(1),scal(2),scal(5),n_dips,scal(4), &
+                    ierr,q_raw_tmp)
+ELSE
+  CALL saw_reset_1d(n,rho,q,itor,area,c1,q_s,dq,ramp,rule,drop,width,q_new,dj,wr,scal(1),scal(2),scal(5),n_dips,scal(4),ierr)
+END IF
 scal(3) = REAL(n_dips,8)
 END SUBROUTINE tokamaker_saw_reset_1d
 !---------------------------------------------------------------------------------

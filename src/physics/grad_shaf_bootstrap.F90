@@ -47,6 +47,8 @@ TYPE :: boot_ops
   REAL(r8) :: saw_relax = 1.0_r8 !< Under-relaxation of the jphi_saw update (1 = none)
   REAL(r8) :: saw_ramp = 0.01_r8 !< Reset weight ramps over this q deficit below saw_q_s (0 = hard trigger)
   INTEGER(i4) :: saw_rule = 2 !< Reset rule: 1 = fuse (axis to rho_m, FUSE saw_crash!), 2 = local (each dip, two-sided)
+  REAL(r8) :: saw_drop = 0.0_r8 !< Rule 2: width in rho over which the reset current leaves its flat band
+  REAL(r8) :: saw_width = 0.0_r8 !< Rule 2: width in rho over which it rejoins the base (0 = q-target reset)
   INTEGER(i4) :: bs_interp = 2 !< Kinetic gradients and sawtooth-reset interpolation (@ref node_slopes): 1 = linterp
                                !! (finite differences, piecewise linear), 2 = hermite (pchip), 3 = cubic (C2 spline)
 END TYPE boot_ops
@@ -159,6 +161,8 @@ IF(self%boot_ops%initialized)THEN
   CALL hdf5_write(self%boot_ops%saw_relax,filename,path//'/BOOT_OPS/SAW_RELAX')
   CALL hdf5_write(self%boot_ops%saw_ramp,filename,path//'/BOOT_OPS/SAW_RAMP')
   CALL hdf5_write(self%boot_ops%saw_rule,filename,path//'/BOOT_OPS/SAW_RULE')
+  CALL hdf5_write(self%boot_ops%saw_drop,filename,path//'/BOOT_OPS/SAW_DROP')
+  CALL hdf5_write(self%boot_ops%saw_width,filename,path//'/BOOT_OPS/SAW_WIDTH')
   CALL hdf5_write(self%boot_ops%bs_interp,filename,path//'/BOOT_OPS/BS_INTERP')
 END IF
 CALL boot_profs_save(self%boot_profs,filename,path//'/BOOT_PROFS')
@@ -231,6 +235,10 @@ IF(hdf5_field_exist(filename,path//'/BOOT_OPS'))THEN
     CALL hdf5_read(self%boot_ops%saw_relax,filename,path//'/BOOT_OPS/SAW_RELAX',success=success)
     CALL hdf5_read(self%boot_ops%saw_ramp,filename,path//'/BOOT_OPS/SAW_RAMP',success=success)
     CALL hdf5_read(self%boot_ops%saw_rule,filename,path//'/BOOT_OPS/SAW_RULE',success=success)
+  END IF
+  IF(hdf5_field_exist(filename,path//'/BOOT_OPS/SAW_WIDTH'))THEN
+    CALL hdf5_read(self%boot_ops%saw_drop,filename,path//'/BOOT_OPS/SAW_DROP',success=success)
+    CALL hdf5_read(self%boot_ops%saw_width,filename,path//'/BOOT_OPS/SAW_WIDTH',success=success)
   END IF
   IF(hdf5_field_exist(filename,path//'/BOOT_OPS/BS_INTERP')) &
     CALL hdf5_read(self%boot_ops%bs_interp,filename,path//'/BOOT_OPS/BS_INTERP',success=success)
@@ -938,7 +946,8 @@ qr(1:nk) = qb(1:nk)
 CALL quad_smooth(nk, rho(kk(1:nk)), qb(1:nk), saw_nsmooth)
 CALL saw_reset_1d(nk, rho(kk(1:nk)), qb(1:nk), Ib(kk(1:nk)), Ar(kk(1:nk)), c1(kk(1:nk)), &
                   self%boot_ops%saw_q_s, self%boot_ops%saw_dq, self%boot_ops%saw_ramp, &
-                  self%boot_ops%saw_rule, qn(1:nk), djr(1:nk), wr(1:nk), rho_s, rho_m, rho_out, n_dips, w, ierr, qr(1:nk))
+                  self%boot_ops%saw_rule, self%boot_ops%saw_drop, self%boot_ops%saw_width, &
+                  qn(1:nk), djr(1:nk), wr(1:nk), rho_s, rho_m, rho_out, n_dips, w, ierr, qr(1:nk))
 IF(ierr /= 0)THEN
   CALL oft_warn('saw_redistribute: sawtooth reset failed, keeping the last reset this update')
   RETURN
@@ -1099,9 +1108,12 @@ END SUBROUTINE quad_smooth
 !! beyond the outermost q < q_s point), p C1 onto q at rho_m, weighted by w = clamp((q_s - min q)/ramp, 0, 1).
 !! rule 2 (local): each q < q_s + dq interval holding a q < q_s point is reset about its q minimum,
 !! weighted per interval (@ref local_reset); q is unchanged elsewhere, so dI = 0 at interval ends.
-!! dI = I*(q/q_new - 1) (with q_raw, lowered where the reset acts until q_raw*I/(I + dI) >= q_s), dj = (d dI/dA)/c1.
+!! rule 2 with `width` > 0: each interval is reset on the current instead (@ref band_reset), with C2 joins.
+!! dI = I*(q/q_new - 1) (with q_raw, lowered where a q-target reset acts until q_raw*I/(I + dI) >= q_s; the
+!! current-blend reset holds min(q, q_raw) itself), dj = (d dI/dA)/c1.
 !---------------------------------------------------------------------------------
-SUBROUTINE saw_reset_1d(n, rho, q, I, A, c1, q_s, dq, ramp, rule, q_new, dj, wr, rho_s, rho_m, rho_out, n_dips, w, ierr, q_raw)
+SUBROUTINE saw_reset_1d(n, rho, q, I, A, c1, q_s, dq, ramp, rule, drop, width, q_new, dj, wr, rho_s, rho_m, rho_out, &
+                        n_dips, w, ierr, q_raw)
 INTEGER(i4), INTENT(in) :: n
 REAL(r8), INTENT(in) :: rho(n) !< Radius, ascending from the axis
 REAL(r8), INTENT(in) :: q(n) !< Base q
@@ -1110,6 +1122,8 @@ REAL(r8), INTENT(in) :: A(n) !< Enclosed area
 REAL(r8), INTENT(in) :: c1(n) !< d(jtor)/d(jphi)
 REAL(r8), INTENT(in) :: q_s, dq, ramp
 INTEGER(i4), INTENT(in) :: rule !< 1 = fuse, 2 = local
+REAL(r8), INTENT(in) :: drop !< Rule 2, `width` > 0: width in rho over which the current leaves the flat band
+REAL(r8), INTENT(in) :: width !< Rule 2: width in rho over which the current rejoins the base (0 = q-target reset)
 REAL(r8), INTENT(out) :: q_new(n), dj(n), wr(n), rho_s, rho_m, rho_out, w
 INTEGER(i4), INTENT(out) :: n_dips
 INTEGER(i4), INTENT(out) :: ierr !< 0 on success, -1 if a gradient failed (no reset: q_new = q, dj = 0)
@@ -1117,13 +1131,14 @@ REAL(r8), OPTIONAL, INTENT(in) :: q_raw(n) !< Base q before smoothing (`q` smoot
 INTEGER(i4) :: k, ia, n_low
 INTEGER(i4), ALLOCATABLE :: reg_start(:), reg_end(:)
 REAL(r8) :: qm
-LOGICAL :: ok
-REAL(r8), ALLOCATABLE :: dI(:), gq(:), qt(:)
+LOGICAL :: ok, ok_b
+REAL(r8), ALLOCATABLE :: dI(:), gq(:), qt(:), wb(:), jb(:), jc(:), dIc(:), ql(:)
 q_new = q; dj = 0.0_r8; wr = 0.0_r8; rho_s = 0.0_r8; rho_m = 0.0_r8; rho_out = 0.0_r8; w = 0.0_r8; n_dips = 0
 ierr = 0
 IF(n < 3)RETURN
 !---Separate q < q_s regions [reg_start(k), reg_end(k)]
-ALLOCATE(reg_start(n), reg_end(n), gq(n), dI(n), qt(n))
+ALLOCATE(reg_start(n), reg_end(n), gq(n), dI(n), qt(n), wb(n))
+wb = 0.0_r8
 n_low = 0
 DO k = 1, n
   IF(q(k) >= q_s)CYCLE
@@ -1156,6 +1171,14 @@ IF(rule == 1)THEN
     WHERE(rho < rho_m)wr = w
   END IF
 ELSE
+  IF(width > 0.0_r8)THEN
+    !---Current-blend resets: base jphi jb, current jphi jc and enclosed-current change dIc so far, floor q ql
+    ALLOCATE(jb(n), jc(n), dIc(n), ql(n))
+    CALL gradient_(n, A, I, jb, ierr, edge_order=1)
+    IF(ierr /= 0)RETURN
+    jb = jb/c1; jc = jb; dIc = 0.0_r8; ql = q
+    IF(PRESENT(q_raw))ql = MIN(q, q_raw)
+  END IF
   !---Maximal q < q_s + dq intervals [ia, k] with an outer crossing and a q < q_s point
   ia = 0
   DO k = 1, n
@@ -1163,12 +1186,16 @@ ELSE
     IF(ia == 0)ia = k
     IF(k == n)EXIT
     IF(q(k+1) < qm)CYCLE
-    IF(MINVAL(q(ia:k)) < q_s)CALL local_reset(ia, k)
+    IF(MINVAL(q(ia:k)) < q_s)THEN
+      ok_b = .FALSE.
+      IF(width > 0.0_r8)CALL band_reset(ia, k, ok_b)
+      IF(.NOT.ok_b)CALL local_reset(ia, k)
+    END IF
     ia = 0
   END DO
 END IF
 dI = I*(q/q_new - 1.0_r8)
-IF(PRESENT(q_raw))dI = dI + wr*MIN(I*(q_raw/q_s - 1.0_r8) - dI, 0.0_r8)
+IF(PRESENT(q_raw))dI = dI + wr*(1.0_r8 - wb)*MIN(I*(q_raw/q_s - 1.0_r8) - dI, 0.0_r8)
 CALL gradient_(n, A, dI, dj, ierr, edge_order=1)
 IF(ierr /= 0)THEN
   q_new = q; wr = 0.0_r8
@@ -1205,6 +1232,134 @@ DO kk = 1, jm - 1
 END DO
 ok_ = .TRUE.
 END SUBROUTINE full_reset
+!---Current-blend reset of interval [ia_, ib_] (ib_ < n): jphi flat over a band about the interval's q minimum
+!   (from the axis if the interval holds it), leaving it with gradient steps g dj_c (g a C2 step 0 -> 1 over `drop`
+!   from the band) and rejoining the base with an extra gradient a b (b = g (1 - a C2 step over `width`), inside
+!   clipped at the axis); a and the band level keep jphi at the edge (and at the axis off it) and the enclosed
+!   current beyond the reach (@ref band_floor). The band is the narrowest giving q >= q_s (a fraction of the
+!   narrowest if that overshoots), weighted by the trigger ramp. ok_ = .FALSE. (nothing set) if no band fits.
+SUBROUTINE band_reset(ia_, ib_, ok_)
+INTEGER(i4), INTENT(in) :: ia_, ib_
+LOGICAL, INTENT(out) :: ok_
+INTEGER(i4) :: it, kk
+LOGICAL :: axis
+REAL(r8) :: rc, h0, h1, hm, lam, lo, wk, ra, rb, w1
+REAL(r8) :: jn(n), dIn(n)
+axis = (ia_ == 1)
+rc = 0.0_r8
+IF(.NOT.axis)rc = centre(ia_, ib_, rho(ia_-1), rho(ib_+1))
+h0 = 0.0_r8
+h1 = rho(n) - width - rc
+IF(.NOT.axis)h1 = MIN(h1, rc - drop)
+ok_ = (h1 > h0)
+IF(ok_)ok_ = (band_floor(rc, h1, 1.0_r8, axis, ib_, jn, dIn) >= 0.0_r8)
+IF(.NOT.ok_)RETURN
+lam = 1.0_r8
+IF(band_floor(rc, h0, 1.0_r8, axis, ib_, jn, dIn) >= 0.0_r8)THEN
+  !---The narrowest band overshoots: a fraction of it
+  lo = 0.0_r8
+  DO it = 1, 50
+    hm = 0.5_r8*(lo + lam)
+    IF(band_floor(rc, h0, hm, axis, ib_, jn, dIn) < 0.0_r8)THEN
+      lo = hm
+    ELSE
+      lam = hm
+    END IF
+  END DO
+  h1 = h0
+ELSE
+  DO it = 1, 50
+    hm = 0.5_r8*(h0 + h1)
+    IF(band_floor(rc, hm, 1.0_r8, axis, ib_, jn, dIn) < 0.0_r8)THEN
+      h0 = hm
+    ELSE
+      h1 = hm
+    END IF
+  END DO
+END IF
+hm = band_floor(rc, h1, lam, axis, ib_, jn, dIn) ! jn, dIn of the band found
+wk = run_weight(ia_, ib_)
+jc = jc + wk*(jn - jc)
+dIc = dIc + wk*(dIn - dIc)
+rb = rc + h1; ra = rc - h1; w1 = MIN(width, ra)
+DO kk = 1, n
+  IF((.NOT.axis .AND. rho(kk) < ra - w1) .OR. rho(kk) > rb + width)CYCLE
+  q_new(kk) = q(kk)*jb(1)/jc(1)
+  IF(I(kk) > 0.0_r8)q_new(kk) = q(kk)*I(kk)/(I(kk) + dIc(kk))
+  wr(kk) = wk; wb(kk) = 1.0_r8
+END DO
+n_dips = n_dips + 1
+w = MAX(w, wk)
+rho_out = rb + width
+END SUBROUTINE band_reset
+!---Band of half-width h_ about r_c (from the axis if axis_) over the current jphi jc, scaled by lam_: jn and the
+!   enclosed-current change dIn (with dIc); result min(ql*I/(I + dIn)) - q_s over the nodes it may lower
+!   (later intervals excluded), -1 if no fit
+FUNCTION band_floor(r_c, h_, lam_, axis_, ib_, jn, dIn) RESULT(f)
+REAL(r8), INTENT(in) :: r_c, h_, lam_
+LOGICAL, INTENT(in) :: axis_
+INTEGER(i4), INTENT(in) :: ib_
+REAL(r8), INTENT(out) :: jn(n), dIn(n)
+REAL(r8) :: f
+INTEGER(i4) :: kk
+REAL(r8) :: ra, rb, w1, t, g, b1, b2, det, x1, x2, m(2,2), rhs(2), wa, P(n), C(n), Q(n)
+rb = r_c + h_; ra = r_c - h_; w1 = MIN(width, ra)
+!---Profiles from the axis: jn = P + x1*C + x2*Q (C = 1 on the axis, else the inner bump sum)
+P(1) = jc(1); C(1) = 1.0_r8; Q(1) = 0.0_r8
+IF(.NOT.axis_)C(1) = 0.0_r8
+DO kk = 2, n
+  t = 0.5_r8*(rho(kk-1) + rho(kk))
+  g = 0.0_r8; b1 = 0.0_r8; b2 = 0.0_r8
+  IF(t >= rb)THEN
+    g = smooth_step((t - rb)/drop)
+    b2 = g*(1.0_r8 - smooth_step((t - rb)/width))
+  ELSE IF(.NOT.axis_ .AND. t <= ra)THEN
+    g = smooth_step((ra - t)/drop)
+    b1 = g*(1.0_r8 - smooth_step((ra - t)/w1))
+  END IF
+  P(kk) = P(kk-1) + g*(jc(kk) - jc(kk-1))
+  C(kk) = C(kk-1)
+  IF(.NOT.axis_)C(kk) = C(kk-1) + b1*(rho(kk) - rho(kk-1))
+  Q(kk) = Q(kk-1) + b2*(rho(kk) - rho(kk-1))
+END DO
+!---x1, x2: jn = jc at the edge and the same enclosed current there (trapezoid in A, a rectangle inside node 1)
+m(1,:) = [C(n), Q(n)]; rhs(1) = jc(n) - P(n)
+m(2,:) = 0.0_r8; rhs(2) = 0.0_r8
+DO kk = 1, n
+  wa = 0.5_r8*(A(MIN(kk+1,n)) - A(MAX(kk-1,1)))
+  IF(kk == 1)wa = A(1) + 0.5_r8*(A(2) - A(1))
+  m(2,:) = m(2,:) + wa*c1(kk)*[C(kk), Q(kk)]
+  rhs(2) = rhs(2) - wa*c1(kk)*(P(kk) - jc(kk))
+END DO
+det = m(1,1)*m(2,2) - m(1,2)*m(2,1)
+f = -1.0_r8
+IF(.NOT.(ABS(det) > 0.0_r8))RETURN
+x1 = (rhs(1)*m(2,2) - m(1,2)*rhs(2))/det
+x2 = (m(1,1)*rhs(2) - m(2,1)*rhs(1))/det
+jn = jc + lam_*(P + x1*C + x2*Q - jc)
+dIn(1) = dIc(1) + A(1)*c1(1)*(jn(1) - jc(1))
+DO kk = 2, n
+  dIn(kk) = dIn(kk-1) + (dIc(kk) - dIc(kk-1)) &
+    + 0.5_r8*(A(kk) - A(kk-1))*(c1(kk)*(jn(kk) - jc(kk)) + c1(kk-1)*(jn(kk-1) - jc(kk-1)))
+END DO
+IF(.NOT.ALL(I + dIn > 0.0_r8 .OR. I <= 0.0_r8))RETURN
+f = HUGE(1.0_r8)
+DO kk = 1, n
+  IF(kk > ib_ .AND. q(kk) < qm)CYCLE
+  IF(I(kk) > 0.0_r8)THEN
+    f = MIN(f, ql(kk)*I(kk)/(I(kk) + dIn(kk)) - q_s)
+  ELSE
+    f = MIN(f, ql(kk)*jb(1)/jn(1) - q_s)
+  END IF
+END DO
+END FUNCTION band_floor
+!---C2 step: 0 for t <= 0, 1 for t >= 1, 6t^5 - 15t^4 + 10t^3 between
+PURE FUNCTION smooth_step(t) RESULT(s)
+REAL(r8), INTENT(in) :: t
+REAL(r8) :: s
+s = MIN(MAX(t, 0.0_r8), 1.0_r8)
+s = s**3*(10.0_r8 - 15.0_r8*s + 6.0_r8*s**2)
+END FUNCTION smooth_step
 !---Local reset of interval [ia_, ib_] (q < q_s + dq, ib_ < n). Humps (q maxima) split it into segments:
 !   between two q < q_s runs the highest point of the gap, between a run and an interval end its highest
 !   interior local maximum. The merged reset (one centre, interval ends) blends into the split one (each
