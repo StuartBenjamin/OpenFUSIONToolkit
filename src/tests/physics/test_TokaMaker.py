@@ -2231,6 +2231,14 @@ def run_ITER_bootstrap_saw_internal(mesh_resolution, fe_order, mp_q):
         q_3 = mygs.get_q(npsi=100)[1]
         if not sum_ok(p_3) or p_3['saw_n_dips'] != 1 or abs(np.min(q_3) - q_s) > 0.01 or q_3[0] < q_base[0] - 0.01:
             raise AssertionError("shear floor: sum / n_dips / min q / q0 wrong")
+        # (j) inductive current peaked on the axis (linear in rho there) on the node-dense axis of (e), shear floor
+        #     from the axis: the reset leaves no peak on the axis node
+        mygs.boot_reset()
+        peak = dict(dense, ffp_prof=dict(dense['ffp_prof'], y=dense['ffp_prof']['y']*(1.0 + np.exp(-np.sqrt(x2)/0.05))))
+        p_j = mygs.solve_bootstrap(saw_q_s=float(q_base[0]) + 0.2, saw_rule=3, saw_width=0.1, **peak)
+        print(f"saw axis peak: jphi_total[0]/jphi_total[1] - 1 = {p_j['jphi_total'][0]/p_j['jphi_total'][1] - 1.0:.2e}")
+        if abs(p_j['jphi_total'][0]/p_j['jphi_total'][1] - 1.0) > 0.02:
+            raise AssertionError("shear floor: peak of the base current left on the axis node")
     except Exception as e:
         print(e)
         mp_q.put(None)

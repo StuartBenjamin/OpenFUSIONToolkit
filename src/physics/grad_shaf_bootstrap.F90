@@ -959,11 +959,14 @@ IF(ierr /= 0)THEN
   RETURN
 END IF
 !---Reset interpolated in rho (as set by bs_interp, @ref nodes_interp); inside the
-!   reset the base structure between kept nodes is reset too (target total = base + reset is
-!   interpolated), weighted by the reset weight (rule 1: w inside rho_m, a sharp cut as in FUSE;
-!   rules 2, 3: wr interpolated) so it vanishes with the reset
+!   reset the base is taken in the reset's stencil (dIb/dA, as dj), so the total there is d(Ib + dI)/dA
+!   and base structure the integrals do not resolve (between kept nodes, a peak on the axis) is reset
+!   too, weighted by the reset weight (rule 1: w inside rho_m, a sharp cut as in FUSE; rules 2, 3: wr
+!   interpolated) so it vanishes with the reset (Ar increases on the kept nodes: no failure for a finite base)
+CALL gradient_(nk, Ar(kk(1:nk)), Ib(kk(1:nk)), g(1:nk), ierr, edge_order=1)
 DO i = 1, nk
-  phi(i) = j_base(n+1-kk(i))
+  k = n + 1 - kk(i)
+  phi(i) = j_base(k) + (g(i) - jt_base(k))/c1(kk(i))
 END DO
 CALL nodes_interp(self%boot_ops%bs_interp, nk, rho(kk(1:nk)), djr(1:nk), n, rho, djn)
 CALL nodes_interp(self%boot_ops%bs_interp, nk, rho(kk(1:nk)), wr(1:nk), n, rho, wn)
