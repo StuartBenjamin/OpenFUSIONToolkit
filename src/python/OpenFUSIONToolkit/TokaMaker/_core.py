@@ -20,7 +20,7 @@ from ..fe import Lagrange_2D_field_interpolator
 
 ## Bootstrap current profiles of get_boot_profs, in the Fortran `boot_prof_names` order
 _BOOT_PROF_NAMES = ('psi_n', 'jdotB_bs_raw', 'jphi_bs_raw', 'jphi_pd_raw', 'jphi_total', 'jphi_bs',
-                    'jphi_pd', 'jphi_ind', 'jphi_saw', 'jphi_fixed')
+                    'jphi_pd', 'jphi_ind', 'jphi_saw', 'jphi_fixed', 'ne_flat', 'te_flat', 'ni_flat', 'ti_flat', 'zeff_flat')
 
 def create_prof_file(self, filename, profile_dict, name):
     '''! Create profile input file to be read by load_profiles()
@@ -145,10 +145,15 @@ _BOOT_OPS_DEFAULTS = {
     'saw_drop': 0.0,
     'saw_width': 0.0,
     'saw_shear': 0.0,
+    'saw_flatten': 0,
+    'saw_flatten_drop': 0.0,
+    'saw_flatten_width': 0.0,
     'bs_interp': 2,
 }
 ## Names of the `bs_interp` codes 1, 2, 3 (see @ref TokaMaker.TokaMaker_equilibrium.set_boot_ops "set_boot_ops")
 _BS_INTERP_NAMES = ('linterp', 'hermite', 'cubic')
+## Names of the `saw_flatten` codes 0, 1
+_SAW_FLATTEN_NAMES = ('off', 'volume')
 
 
 ## Keyword inputs of @ref TokaMaker.TokaMaker.solve_bootstrap "solve_bootstrap" kept between calls and in saved files
@@ -1028,7 +1033,8 @@ class TokaMaker():
     def set_boot_ops(self, isolate_edge_jbs=None, scale_jbs=None, djbs_tol=None,
                      diagnose_bs=None, taper_edge_jphi=None, taper_edge_psi0=None, taper_edge_shape=None,
                      saw_q_s=None, saw_dq=None, saw_tol=None, saw_relax=None, saw_ramp=None, saw_rule=None,
-                     bs_interp=None, saw_drop=None, saw_width=None, saw_shear=None):
+                     bs_interp=None, saw_drop=None, saw_width=None, saw_shear=None,
+                     saw_flatten=None, saw_flatten_drop=None, saw_flatten_width=None):
         r'''! Set bootstrap current options for the jphi-split-bootstrap current profile update
 
         See @ref TokaMaker.TokaMaker_equilibrium.set_boot_ops "set_boot_ops"
@@ -1039,7 +1045,8 @@ class TokaMaker():
                                                diagnose_bs,
                                                taper_edge_jphi, taper_edge_psi0, taper_edge_shape,
                                                saw_q_s, saw_dq, saw_tol, saw_relax, saw_ramp, saw_rule,
-                                               bs_interp, saw_drop, saw_width, saw_shear)
+                                               bs_interp, saw_drop, saw_width, saw_shear,
+                                               saw_flatten, saw_flatten_drop, saw_flatten_width)
 
     def get_boot_profs(self):
         r'''! Get the current profiles of the last G-S solve with a `jphi-split-bootstrap` current profile
@@ -2573,6 +2580,7 @@ class TokaMaker():
           \f$\alpha j_{ind} + j_{BS} + j_{fixed} + j_{saw,in}\f$ in the traced geometry is reset where it dips
           below q_s (``saw_rule``); the Ip-neutral current that does this is added to ``jphi_saw``
         @param saw_dq, saw_tol, saw_relax, saw_ramp, saw_rule, saw_drop, saw_width, saw_shear, bs_interp See ``set_boot_ops()``
+        @param saw_flatten, saw_flatten_drop, saw_flatten_width See ``set_boot_ops()``
 
         @result Dictionary with 1-D numpy array values (A/m² unless noted). All current densities, inputs
           included, are TokaMaker \f$j_\phi = \langle j_\phi \rangle = \langle R \rangle P' + \langle 1/R \rangle FF'/\mu_0\f$
@@ -2592,6 +2600,9 @@ class TokaMaker():
           - ``'jphi_fixed'`` Fixed current density ``jphi_fixed_prof`` (optionally tapered, zero if not set) [A/m^2]
           - ``'saw_rho_m'``, ``'saw_rho_out'``, ``'saw_n_dips'`` Sawtooth radius (q_s + dq crossing beyond the outermost
             q < q_s, \f$\rho_{tor,N}\f$), outer end of the reset and number of regions reset, at the last reset
+          - With ``saw_flatten``: ``'saw_flat_rho'`` the flattening radius (\f$\rho_{tor,N}\f$), and ``'ne_flat'``,
+            ``'te_flat'``, ``'ni_flat'``, ``'ti_flat'``, ``'zeff_flat'`` the kinetics flattened as the pressure on ``'psi_n'``
+            [m^-3, keV, -]
         '''
         # Keyword inputs left as None keep their values from the previous call or the loaded state
         kept = self._tMaker_equil._boot_inputs or {}
@@ -3221,7 +3232,8 @@ class TokaMaker_equilibrium():
     def set_boot_ops(self, isolate_edge_jbs=None, scale_jbs=None, djbs_tol=None,
                      diagnose_bs=None, taper_edge_jphi=None, taper_edge_psi0=None, taper_edge_shape=None,
                      saw_q_s=None, saw_dq=None, saw_tol=None, saw_relax=None, saw_ramp=None, saw_rule=None,
-                     bs_interp=None, saw_drop=None, saw_width=None, saw_shear=None):
+                     bs_interp=None, saw_drop=None, saw_width=None, saw_shear=None,
+                     saw_flatten=None, saw_flatten_drop=None, saw_flatten_width=None):
         r'''! Set bootstrap current options for the jphi-split-bootstrap current profile update.
 
         Call after setting a `jphi-split-bootstrap`-type ffp_prof profile, and before mygs.solve().
@@ -3254,11 +3266,25 @@ class TokaMaker_equilibrium():
           and q >= saw_q_s. (Internal default: 0, the q-target reset). Rule 3: saw_width > 0 is the width of the floor's
           slope ramp and joins, saw_drop 0.
         @param saw_shear Rule 3: minimum dq/drho (rho = sqrt(Phi_N)) of the q floor. (Internal default: 0)
+        @param saw_flatten Pressure flattening with the shear-floor reset (saw_rule 3): 'volume' makes the pressure flat
+          at its volume average inside the outermost radius where the equilibrium's q is at the floor (within 0.005 of
+          saw_q_s), taken once the unflattened reset has settled (kept in saved states, found again when options are
+          set). The currents are those of the unflattened kinetics and pressure, and q is held at the unflattened
+          equilibrium's out to the radius + saw_flatten_width, so q and the current are as without flattening; n_e, n_i,
+          and T_e, T_i, Z_eff through n_e T_e, n_i T_i, n_e Z_eff, flattened as the pressure are returned. 'off': none.
+          (Internal default: 'off')
+        @param saw_flatten_drop, saw_flatten_width Flattening widths in rho = sqrt(Phi_N) (0 <= saw_flatten_drop <
+          saw_flatten_width): the gradient leaves the flat core within saw_flatten_drop and rejoins the profile's at the
+          radius + saw_flatten_width, with continuous slope; the whole-plasma contents are kept. (Internal default: 0)
         '''
         if bs_interp is not None:
             if bs_interp not in _BS_INTERP_NAMES:
                 raise ValueError(f"bs_interp must be one of {_BS_INTERP_NAMES} (got {bs_interp!r})")
             bs_interp = _BS_INTERP_NAMES.index(bs_interp) + 1
+        if saw_flatten is not None:
+            if saw_flatten not in _SAW_FLATTEN_NAMES:
+                raise ValueError(f"saw_flatten must be one of {_SAW_FLATTEN_NAMES} (got {saw_flatten!r})")
+            saw_flatten = _SAW_FLATTEN_NAMES.index(saw_flatten)
         if self._boot_ops is None:
             self._boot_ops = dict(_BOOT_OPS_DEFAULTS)
         for key, val in (('isolate_edge_jbs', isolate_edge_jbs), ('scale_jbs', scale_jbs), ('djbs_tol', djbs_tol),
@@ -3266,7 +3292,9 @@ class TokaMaker_equilibrium():
                          ('taper_edge_psi0', taper_edge_psi0), ('taper_edge_shape', taper_edge_shape),
                          ('saw_q_s', saw_q_s), ('saw_dq', saw_dq), ('saw_tol', saw_tol), ('saw_relax', saw_relax),
                          ('saw_ramp', saw_ramp), ('saw_rule', saw_rule), ('bs_interp', bs_interp),
-                         ('saw_drop', saw_drop), ('saw_width', saw_width), ('saw_shear', saw_shear)):
+                         ('saw_drop', saw_drop), ('saw_width', saw_width), ('saw_shear', saw_shear),
+                         ('saw_flatten', saw_flatten), ('saw_flatten_drop', saw_flatten_drop),
+                         ('saw_flatten_width', saw_flatten_width)):
             if val is not None:
                 self._boot_ops[key] = type(_BOOT_OPS_DEFAULTS[key])(val)
         if self._boot_ops['saw_q_s'] < 0.0 or self._boot_ops['saw_dq'] <= 0.0 or not (0.0 < self._boot_ops['saw_relax'] <= 1.0) \
@@ -3280,6 +3308,9 @@ class TokaMaker_equilibrium():
         elif self._boot_ops['saw_width'] != 0.0 and not (0.0 < self._boot_ops['saw_drop'] < self._boot_ops['saw_width']
                                                          and self._boot_ops['saw_rule'] == 2):
             raise ValueError("saw_width > 0 needs 0 < saw_drop < saw_width and saw_rule 2")
+        if self._boot_ops['saw_flatten'] and not (self._boot_ops['saw_q_s'] > 0.0 and self._boot_ops['saw_rule'] == 3 and
+                                                  0.0 <= self._boot_ops['saw_flatten_drop'] < self._boot_ops['saw_flatten_width']):
+            raise ValueError("saw_flatten needs saw_q_s > 0, saw_rule 3 and 0 <= saw_flatten_drop < saw_flatten_width")
         if self._boot_ops['taper_edge_shape'] not in (1, 2, 3) or not (0.0 < self._boot_ops['taper_edge_psi0'] < 1.0):
             raise ValueError("taper options: need taper_edge_shape in (1, 2, 3) and 0 < taper_edge_psi0 < 1")
         bops = tokamaker_boot_ops_struct()
@@ -3299,7 +3330,9 @@ class TokaMaker_equilibrium():
           doc_tokamaker_current_conventions); `'jdotB_bs_raw'` is the Redl
           \f$\langle j_{BS} \cdot B \rangle\f$ [T A/m²] behind `'jphi_bs_raw'`. `_raw`: from the last
           bootstrap evaluation, before scaling, isolation and taper; no suffix: as added into `'jphi_total'`.
-          It also holds the sawtooth scalars `'saw_rho_m'`, `'saw_rho_out'`, `'saw_n_dips'` (zero without a reset).
+          It also holds the sawtooth scalars `'saw_rho_m'`, `'saw_rho_out'`, `'saw_n_dips'` (zero without a reset);
+          with saw_flatten, the radius `'saw_flat_rho'` and the kinetics flattened as the pressure `'ne_flat'`, `'te_flat'`,
+          `'ni_flat'`, `'ti_flat'`, `'zeff_flat'` [m^-3, keV, -] (flattened once the radius is taken).
         '''
         result = {}
         n = c_int(0)
@@ -3312,12 +3345,14 @@ class TokaMaker_equilibrium():
             if n.value > 0:
                 result[name] = numpy.ctypeslib.as_array(prof_ptr, shape=(n.value,)).copy()
         if result:
-            saw_rho_m, saw_rho_out, saw_n_dips = c_double(0.0), c_double(0.0), c_int(0)
+            saw_rho_m, saw_rho_out, saw_n_dips, saw_flat_rho = c_double(0.0), c_double(0.0), c_int(0), c_double(0.0)
             tokamaker_get_boot_saw(self.c_ptr, ctypes.byref(saw_rho_m), ctypes.byref(saw_rho_out),
-                                   ctypes.byref(saw_n_dips), error_string)
+                                   ctypes.byref(saw_n_dips), ctypes.byref(saw_flat_rho), error_string)
             if error_string.value != b'':
                 raise Exception(error_string.value)
             result.update(saw_rho_m=saw_rho_m.value, saw_rho_out=saw_rho_out.value, saw_n_dips=saw_n_dips.value)
+            if (self._boot_ops or {}).get('saw_flatten'):
+                result['saw_flat_rho'] = saw_flat_rho.value
         if result and (self.psi_convention == 0):
             # OFT convention (0 = LCFS, LCFS first) to standard convention (0 = axis, axis first)
             if 'psi_n' in result:

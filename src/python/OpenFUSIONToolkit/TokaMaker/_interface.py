@@ -49,6 +49,9 @@ class tokamaker_boot_ops_struct(c_struct):
      - `saw_drop`, `saw_width` Rule 2: drop-off and rejoin widths (rho) of the current-blend reset (saw_width 0: off);
        rule 3: saw_width is the width (rho) of the floor's slope ramp and joins
      - `saw_shear` Rule 3: minimum dq/drho of the q floor
+     - `saw_flatten` Pressure flat where the unflattened q is at the floor, q kept: 0 off (default), 1 volume
+     - `saw_flatten_drop`, `saw_flatten_width` Flattening: widths (rho) over which the gradient leaves the flat core and
+       the profiles rejoin beyond the radius
      - `bs_interp` Profile interpolation in the bootstrap update: 1 linterp, 2 hermite (pchip; default), 3 cubic (C2)
     '''
     _fields_ = [('isolate_edge_jbs', c_bool),
@@ -67,6 +70,9 @@ class tokamaker_boot_ops_struct(c_struct):
                 ('saw_drop', c_double),
                 ('saw_width', c_double),
                 ('saw_shear', c_double),
+                ('saw_flatten', c_int),
+                ('saw_flatten_drop', c_double),
+                ('saw_flatten_width', c_double),
                 ('bs_interp', c_int)]
 
 # tokamaker_alloc(tMaker_ptr,mesh_ptr,error_str)
@@ -129,9 +135,9 @@ tokamaker_get_boot_ops = ctypes_subroutine(oftpy_lib.tokamaker_get_boot_ops,
 tokamaker_get_boot_prof = ctypes_subroutine(oftpy_lib.tokamaker_get_boot_prof,
     [c_void_p, c_char_p, c_int_ptr, c_double_ptr_ptr, c_char_p])
 
-# tokamaker_get_boot_saw(tMaker_equil_ptr,saw_rho_m,saw_rho_out,saw_n_dips,error_str)
+# tokamaker_get_boot_saw(tMaker_equil_ptr,saw_rho_m,saw_rho_out,saw_n_dips,saw_flat_rho,error_str)
 tokamaker_get_boot_saw = ctypes_subroutine(oftpy_lib.tokamaker_get_boot_saw,
-    [c_void_p, c_double_ptr, c_double_ptr, c_int_ptr, c_char_p])
+    [c_void_p, c_double_ptr, c_double_ptr, c_int_ptr, c_double_ptr, c_char_p])
 
 # tokamaker_saw_reset_1d(n,rho,q,itor,area,c1,q_s,dq,ramp,rule,drop,width,shear,q_new,dj,wr,scal,ierr,q_raw)
 tokamaker_saw_reset_1d = ctypes_subroutine(oftpy_lib.tokamaker_saw_reset_1d,

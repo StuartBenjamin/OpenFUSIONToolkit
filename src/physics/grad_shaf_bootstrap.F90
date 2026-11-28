@@ -17,7 +17,8 @@ MODULE grad_shaf_bootstrap
 USE oft_base
 USE oft_gs, ONLY: gs_equil, flux_func, gsinv_interp, gs_factory, gs_psi2r, &
  gs_itor_nl, qprof_trace_tol, gs_fpol, qprof_backend
-USE oft_gs_profiles, ONLY: torflux_set_bounds, linterp_save_interp, linterp_interp_token, cubic_slopes, hermite_seg
+USE oft_gs_profiles, ONLY: torflux_set_bounds, linterp_save_interp, linterp_interp_token, cubic_slopes, hermite_seg, &
+  linterp_flux_func, torflux_unwrap
 USE oft_gs_contour, ONLY: gs_sauter_contour
 USE oft_lag_basis, ONLY: oft_blag_geval
 USE oft_mesh_type, ONLY: bmesh_findcell
@@ -52,6 +53,10 @@ TYPE :: boot_ops
   REAL(r8) :: saw_width = 0.0_r8 !< Rule 2: width in rho over which it rejoins the base (0 = q-target reset);
                                  !! rule 3: width in rho of the floor's slope ramp and joins
   REAL(r8) :: saw_shear = 0.0_r8 !< Rule 3: minimum dq/drho of the q floor
+  INTEGER(i4) :: saw_flatten = 0 !< Pressure (and kinetics returned) flat where the unflattened q is at the floor, q kept:
+                                 !! 0 = off, 1 = volume (contents kept, @ref flat_keep)
+  REAL(r8) :: saw_flatten_drop = 0.0_r8 !< Flattening: width in rho over which the gradient leaves the flat core
+  REAL(r8) :: saw_flatten_width = 0.0_r8 !< Flattening: width in rho beyond the radius over which the profiles rejoin
   INTEGER(i4) :: bs_interp = 2 !< Kinetic gradients and sawtooth-reset interpolation (@ref node_slopes): 1 = linterp
                                !! (finite differences, piecewise linear), 2 = hermite (pchip), 3 = cubic (C2 spline)
 END TYPE boot_ops
@@ -72,17 +77,22 @@ TYPE :: boot_profs
   REAL(r8), ALLOCATABLE :: jphi_ind(:) !< Inductive jphi: input jphi times alpha, optionally tapered
   REAL(r8), ALLOCATABLE :: jphi_saw(:) !< Sawtooth jphi: input jphi_saw (optionally tapered) plus the q reset current
   REAL(r8), ALLOCATABLE :: jphi_fixed(:) !< Fixed (non-rescaled) jphi, optionally tapered
+  REAL(r8), ALLOCATABLE :: ne_flat(:), te_flat(:), ni_flat(:), ti_flat(:), zeff_flat(:) !< saw_flatten only: the kinetics
+                                                                                       !! flattened as P [m^-3, keV, -]
   REAL(r8) :: saw_rho_m = 0.0_r8 !< Sawtooth radius (rho_tor_norm): q_s + dq crossing beyond the outermost q_base < q_s (0 = none)
   REAL(r8) :: saw_rho_out = 0.0_r8 !< Outer end of the last reset (rho_tor_norm; 0 = none)
   INTEGER(i4) :: saw_n_dips = 0 !< Regions reset at the last reset (rule 1: separate q_base < saw_q_s regions)
 END TYPE boot_profs
 !> Names of the @ref boot_profs arrays, in declaration order (HDF5 datasets are these in upper case)
-CHARACTER(LEN=16), PARAMETER :: boot_prof_names(10) = [CHARACTER(LEN=16) :: 'psi_n', 'jdotB_bs_raw', &
+CHARACTER(LEN=16), PARAMETER :: boot_prof_names(15) = [CHARACTER(LEN=16) :: 'psi_n', 'jdotB_bs_raw', &
   'jphi_bs_raw', 'jphi_pd_raw', 'jphi_total', 'jphi_bs', 'jphi_pd', 'jphi_ind', &
-  'jphi_saw', 'jphi_fixed']
+  'jphi_saw', 'jphi_fixed', 'ne_flat', 'te_flat', 'ni_flat', 'ti_flat', 'zeff_flat']
 REAL(r8), PARAMETER :: djbs_stol = 1.0e-3_r8 !< Stagnation tolerance: a stalled change above this resets the no-improve counter
 REAL(r8), PARAMETER :: dalpha_warn_tol = 1.0e-6_r8 !< Relative (|dalpha|/|alpha|): no alpha stall warning below this
 INTEGER(i4), PARAMETER :: saw_nsmooth = 8 !< Half-width (kept nodes) of the quadratic fit smoothing q_base in @ref saw_redistribute
+REAL(r8), PARAMETER :: flat_q_tol = 5.0e-3_r8 !< saw_flatten: q up to this above saw_q_s is at the floor
+REAL(r8), PARAMETER :: flat_dr_tol = 1.0e-3_r8 !< saw_flatten: the unflattened radius has settled when it moves less (rho)
+INTEGER(i4), PARAMETER :: flat_n_settle = 2 !< ... over this many consecutive resets
 !------------------------------------------------------------------------------
 !> Jphi flux function type for bootstrap current calculation
 !------------------------------------------------------------------------------
@@ -100,6 +110,16 @@ TYPE, EXTENDS(jphi_flux_func) :: jphi_bs_flux_func
   REAL(r8) :: djsaw_min = HUGE(1.0d0) !< Running minimum djsaw
   REAL(r8), ALLOCATABLE :: jphi_saw_last(:) !< jphi_saw of the last update (mu0*A/m^2)
   REAL(r8), ALLOCATABLE :: jphi_total_last(:) !< jphi_total of the last update (mu0*A/m^2)
+  REAL(r8) :: flat_rho_s = 0.0_r8 !< saw_flatten: radius (rho_tor_norm) where the settled unflattened q is at the floor
+                                  !! (saved; cleared when the options are set)
+  REAL(r8) :: flat_rho_c = 0.0_r8 !< saw_flatten: that radius at the last reset before it settled
+  INTEGER(i4) :: flat_nset = 0 !< saw_flatten: consecutive resets it has moved less than flat_dr_tol
+  REAL(r8), ALLOCATABLE :: flat_rho(:) !< saw_flatten: rho_tor_norm on the nodes at the last reset, axis first
+  REAL(r8), ALLOCATABLE :: flat_vol(:) !< saw_flatten: enclosed volume (any factor) there
+  REAL(r8), ALLOCATABLE :: flat_pp0(:) !< saw_flatten: coefficients of the unflattened P
+  REAL(r8), ALLOCATABLE :: flat_q0(:,:) !< saw_flatten: rho_tor_norm and q (axis first) of the unflattened equilibrium
+                                        !! when the radius was taken, held where the pressure is flattened (saved)
+  REAL(r8) :: flat_pax0 = -1.0_r8 !< saw_flatten: unflattened pax target
   LOGICAL :: ffp_restored = .FALSE. !< F*F' knots were read from a file, so loading keeps them instead of updating
   TYPE(boot_ops) :: boot_ops       !< Options set from Python (@ref tokamaker_set_boot_ops)
   TYPE(boot_profs) :: boot_profs   !< Current profiles of the last update
@@ -167,7 +187,16 @@ IF(self%boot_ops%initialized)THEN
   CALL hdf5_write(self%boot_ops%saw_drop,filename,path//'/BOOT_OPS/SAW_DROP')
   CALL hdf5_write(self%boot_ops%saw_width,filename,path//'/BOOT_OPS/SAW_WIDTH')
   CALL hdf5_write(self%boot_ops%saw_shear,filename,path//'/BOOT_OPS/SAW_SHEAR')
+  CALL hdf5_write(self%boot_ops%saw_flatten,filename,path//'/BOOT_OPS/SAW_FLATTEN')
+  CALL hdf5_write(self%boot_ops%saw_flatten_drop,filename,path//'/BOOT_OPS/SAW_FLATTEN_DROP')
+  CALL hdf5_write(self%boot_ops%saw_flatten_width,filename,path//'/BOOT_OPS/SAW_FLATTEN_WIDTH')
   CALL hdf5_write(self%boot_ops%bs_interp,filename,path//'/BOOT_OPS/BS_INTERP')
+END IF
+IF(ALLOCATED(self%flat_pp0))THEN ! The saved P is flattened: keep the one it was flattened from, and the radius
+  CALL hdf5_write(self%flat_pp0,filename,path//'/FLAT_PP0')
+  CALL hdf5_write(self%flat_pax0,filename,path//'/FLAT_PAX0')
+  CALL hdf5_write(self%flat_rho_s,filename,path//'/FLAT_RHO_S')
+  IF(ALLOCATED(self%flat_q0))CALL hdf5_write(self%flat_q0,filename,path//'/FLAT_Q0')
 END IF
 CALL boot_profs_save(self%boot_profs,filename,path//'/BOOT_PROFS')
 END SUBROUTINE jphi_bs_save_hdf5
@@ -191,7 +220,8 @@ CHARACTER(LEN=*), INTENT(in) :: filename
 CHARACTER(LEN=*), INTENT(in) :: path
 LOGICAL, INTENT(out) :: success
 INTEGER(i4) :: npsi
-INTEGER(i4) :: int_tmp, ierr
+INTEGER(i4) :: int_tmp, ierr, ndims
+INTEGER(i4), ALLOCATABLE :: dim_sizes(:)
 REAL(r8) :: J0
 REAL(r8), ALLOCATABLE :: xvals(:),yvals(:)
 CALL hdf5_read(npsi,filename,path//'/NPSI',success=success)
@@ -248,7 +278,26 @@ IF(hdf5_field_exist(filename,path//'/BOOT_OPS'))THEN
     CALL hdf5_read(self%boot_ops%saw_shear,filename,path//'/BOOT_OPS/SAW_SHEAR',success=success)
   IF(hdf5_field_exist(filename,path//'/BOOT_OPS/BS_INTERP')) &
     CALL hdf5_read(self%boot_ops%bs_interp,filename,path//'/BOOT_OPS/BS_INTERP',success=success)
+  IF(hdf5_field_exist(filename,path//'/BOOT_OPS/SAW_FLATTEN'))THEN
+    CALL hdf5_read(self%boot_ops%saw_flatten,filename,path//'/BOOT_OPS/SAW_FLATTEN',success=success)
+    CALL hdf5_read(self%boot_ops%saw_flatten_drop,filename,path//'/BOOT_OPS/SAW_FLATTEN_DROP',success=success)
+    CALL hdf5_read(self%boot_ops%saw_flatten_width,filename,path//'/BOOT_OPS/SAW_FLATTEN_WIDTH',success=success)
+  END IF
   self%boot_ops%initialized = .TRUE.
+END IF
+IF(hdf5_field_exist(filename,path//'/FLAT_PP0'))THEN
+  CALL hdf5_field_get_sizes(filename,path//'/FLAT_PP0',ndims,dim_sizes)
+  IF(ALLOCATED(self%flat_pp0))DEALLOCATE(self%flat_pp0)
+  ALLOCATE(self%flat_pp0(dim_sizes(1)))
+  CALL hdf5_read(self%flat_pp0,filename,path//'/FLAT_PP0',success=success)
+  CALL hdf5_read(self%flat_pax0,filename,path//'/FLAT_PAX0',success=success)
+  CALL hdf5_read(self%flat_rho_s,filename,path//'/FLAT_RHO_S',success=success)
+  IF(ALLOCATED(self%flat_q0))DEALLOCATE(self%flat_q0)
+  IF(hdf5_field_exist(filename,path//'/FLAT_Q0'))THEN
+    CALL hdf5_field_get_sizes(filename,path//'/FLAT_Q0',ndims,dim_sizes)
+    ALLOCATE(self%flat_q0(dim_sizes(1),dim_sizes(2)))
+    CALL hdf5_read(self%flat_q0,filename,path//'/FLAT_Q0',success=success)
+  END IF
 END IF
 CALL boot_profs_load(self%boot_profs,filename,path//'/BOOT_PROFS')
 success=.TRUE. ! BOOT_OPS and BOOT_PROFS are optional
@@ -328,6 +377,12 @@ SELECT TYPE(new)
     new%djsaw_min = self%djsaw_min
     IF(ALLOCATED(self%jphi_saw_last))new%jphi_saw_last = self%jphi_saw_last
     IF(ALLOCATED(self%jphi_total_last))new%jphi_total_last = self%jphi_total_last
+    new%flat_rho_s = self%flat_rho_s
+    IF(ALLOCATED(self%flat_rho))new%flat_rho = self%flat_rho
+    IF(ALLOCATED(self%flat_vol))new%flat_vol = self%flat_vol
+    IF(ALLOCATED(self%flat_pp0))new%flat_pp0 = self%flat_pp0
+    IF(ALLOCATED(self%flat_q0))new%flat_q0 = self%flat_q0
+    new%flat_pax0 = self%flat_pax0
     new%boot_ops = self%boot_ops
     new%boot_profs = self%boot_profs
 END SELECT
@@ -344,6 +399,10 @@ IF(ASSOCIATED(self%yp))DEALLOCATE(self%yp)
 IF(ASSOCIATED(self%y))DEALLOCATE(self%y)
 IF(ALLOCATED(self%m))DEALLOCATE(self%m)
 CALL reset_solve_state(self)
+IF(ALLOCATED(self%flat_pp0))DEALLOCATE(self%flat_pp0)
+IF(ALLOCATED(self%flat_q0))DEALLOCATE(self%flat_q0)
+self%flat_pax0 = -1.0_r8
+self%flat_rho_s = 0.0_r8
 self%boot_profs = boot_profs()
 END SUBROUTINE jphi_bs_delete
 !------------------------------------------------------------------------------
@@ -417,6 +476,10 @@ self%djsaw_no_improve = 0
 self%djsaw_min = HUGE(1.0d0)
 IF(ALLOCATED(self%jphi_saw_last))DEALLOCATE(self%jphi_saw_last)
 IF(ALLOCATED(self%jphi_total_last))DEALLOCATE(self%jphi_total_last)
+IF(ALLOCATED(self%flat_rho))DEALLOCATE(self%flat_rho)
+IF(ALLOCATED(self%flat_vol))DEALLOCATE(self%flat_vol)
+self%flat_rho_c = 0.0_r8
+self%flat_nset = 0
 CALL saw_scalars_reset(self%boot_profs)
 END SUBROUTINE reset_solve_state
 !------------------------------------------------------------------------------
@@ -449,6 +512,11 @@ SELECT CASE(TRIM(name))
   CASE('jphi_ind'); CALL access(bp%jphi_ind)
   CASE('jphi_saw'); CALL access(bp%jphi_saw)
   CASE('jphi_fixed'); CALL access(bp%jphi_fixed)
+  CASE('ne_flat'); CALL access(bp%ne_flat)
+  CASE('te_flat'); CALL access(bp%te_flat)
+  CASE('ni_flat'); CALL access(bp%ni_flat)
+  CASE('ti_flat'); CALL access(bp%ti_flat)
+  CASE('zeff_flat'); CALL access(bp%zeff_flat)
 END SELECT
 CONTAINS
 SUBROUTINE access(a)
@@ -523,11 +591,13 @@ END FUNCTION h5_name
 !! Called once per NL iteration (the first iteration of a solve runs @ref jphi_update and resets the
 !! convergence state). Current densities are TokaMaker jphi in mu0*A/m² on the nodes `psi_n`
 !! (LCFS and the profile nodes `xpsi`):
-!!   1. Pressure scale.
+!!   1. saw_flatten: the unflattened P and pax target (@ref flatten_pressure), so the currents are those without
+!!      flattening.
 !!   2. jphi_fixed, the input sawtooth current jphi_saw_in and the bootstrap current jphi_bs (here
 !!      with its pressure-driven part jphi_pd, which isolation and scale_jbs leave out), optionally
 !!      isolated and scaled, or reused from the last evaluation when frozen; <R>, <1/R>, <1/R^2> on the nodes
-!!      from its Sauter pass, else (and on the LCFS) from gs_ravgs.
+!!      from its Sauter pass, else (and on the LCFS) from gs_ravgs. Pressure scale (saw_flatten: P and the pax target
+!!      flattened inside the radius, once taken).
 !!   3. Edge taper of jphi_bs, jphi_pd, jphi_ind, jphi_fixed and jphi_saw_in.
 !!   4. alpha from the exact I_p (gs_flux_int of eval_dIdA, eq. A9c), which is affine in
 !!      alpha: alpha = (Ip_target - Ip_lo)/(Ip_hi - Ip_lo).
@@ -587,8 +657,7 @@ CALL gseq%P%update(gseq) ! Make sure pressure profile is up to date with EQ
 IF(ASSOCIATED(gseq%P_ani)) &
   CALL oft_abort('Jphi profiles do not support anisotropic pressure', &
                  'jphi_bs_update',__FILE__)
-pscale = gseq%P%f(gseq%plasma_bounds(2))
-pscale = gseq%pax_target / pscale
+IF(saw_on .AND. (self%boot_ops%saw_flatten > 0))CALL flatten_pressure(self, gseq, psi_n, .FALSE.)
 !--- 2. Fixed, input sawtooth and bootstrap currents
 ALLOCATE(jphi_fixed(0:self%npsi), jphi_saw_in(0:self%npsi), jphi_bs(0:self%npsi), jphi_pd(0:self%npsi))
 CALL node_vals(gseq%jphi_fixed, jphi_fixed)
@@ -641,6 +710,10 @@ ELSE
   self%jphi_bs_last = jphi_bs
   self%jphi_pd_last = jphi_pd
 END IF
+!--- Pressure scale of the equilibrium (saw_flatten: P flattened inside the radius)
+IF(saw_on .AND. (self%boot_ops%saw_flatten > 0))CALL flatten_pressure(self, gseq, psi_n, .TRUE.)
+pscale = gseq%P%f(gseq%plasma_bounds(2))
+pscale = gseq%pax_target / pscale
 !--- <R>, <1/R>, <1/R^2> (I_p measure, F*F' map) not set by the Sauter pass
 IF(bs_frozen)THEN
   CALL gs_ravgs(gseq, self%npsi+1, psi_n, ravgs, qa=qa)
@@ -740,6 +813,15 @@ ELSE
   jphi_saw = jphi_saw_cur
 END IF
 IF(saw_on)self%jphi_saw_last = jphi_saw
+!--- saw_flatten: the unflattened reset has settled (or frozen) with q at the floor, so its radius is taken (it then
+!   stays); the solve reconverges with the flattened P
+IF(saw_on .AND. (self%boot_ops%saw_flatten > 0) .AND. (self%flat_rho_s <= 0.0_r8) .AND. (self%flat_rho_c > 0.0_r8))THEN
+  IF((self%flat_nset >= flat_n_settle) .OR. self%freeze_saw)THEN
+    self%flat_rho_s = self%flat_rho_c
+    self%freeze_jbs = .FALSE.; self%djbs_no_improve = 0; self%djbs_min = HUGE(1.0d0)
+    self%freeze_saw = .FALSE.; self%djsaw_no_improve = 0; self%djsaw_min = HUGE(1.0d0)
+  END IF
+END IF
 !--- 5. Total current, profiles (A/m²), F*F' knots
 jphi_total = alpha * jphi_ind + jphi_bs + jphi_fixed + jphi_saw
 IF(saw_on)self%jphi_total_last = jphi_total
@@ -867,12 +949,12 @@ INTEGER(i4), INTENT(out) :: ierr !< 0 on success, nonzero if the reset failed (w
 INTEGER(i4) :: n, i, k, n_dips, nk
 INTEGER(i4), ALLOCATABLE :: kk(:)
 REAL(r8), PARAMETER :: psi_ax = 1.0e-4_r8
-REAL(r8) :: rho_s, rho_m, rho_out, w, wf, alast, psi, h
-REAL(r8), ALLOCATABLE :: q_eq(:), c1(:), rho(:), qb(:), qr(:), Ib(:), Ie(:), Ar(:), ap(:), qn(:), djr(:), wr(:), r(:), &
-  phi(:), g(:), djn(:), wn(:), jn(:)
+REAL(r8) :: rho_s, rho_m, rho_out, w, wf, alast, psi, h, r_fl, r_hold
+REAL(r8), ALLOCATABLE :: q_eq(:), c1(:), rho(:), qb(:), qr(:), qh(:), Ib(:), Ie(:), Ar(:), Vr(:), ap(:), qn(:), djr(:), &
+  wr(:), r(:), phi(:), g(:), djn(:), wn(:), jn(:)
 n = SIZE(xn)
-ALLOCATE(q_eq(n), c1(n), rho(n), qb(n), qr(n), Ib(n), Ie(n), Ar(n), ap(n), qn(n), djr(n), wr(n), r(n), phi(n), g(n), &
-  djn(n), wn(n), jn(n))
+ALLOCATE(q_eq(n), c1(n), rho(n), qb(n), qr(n), qh(n), Ib(n), Ie(n), Ar(n), Vr(n), ap(n), qn(n), djr(n), wr(n), r(n), &
+  phi(n), g(n), djn(n), wn(n), jn(n))
 !---q and dA/dpsi_N = oint dl/|grad psi_N| on the nodes, axis-first (index 1 = innermost node). Nodes
 !   without a closed surface (the LCFS, the axis, a failed surface) take the values of the next node
 !   inward (the axis: outward).
@@ -889,13 +971,15 @@ DO i = n-1, 1, -1
   IF(.NOT.(q_eq(i) > 0.0_r8))q_eq(i) = q_eq(i+1)
   IF(.NOT.(ap(i) > 0.0_r8))ap(i) = ap(i+1)
 END DO
-!---Enclosed area and currents (trapezoid in psi_N; the piece inside the innermost node as a rectangle)
+!---Enclosed area, volume (/2 pi: dV/dpsi_N = 2 pi oint R dl/|grad psi_N| = 2 pi (dA/dpsi_N)/<1/R>) and currents
+!   (trapezoid in psi_N; the piece inside the innermost node as a rectangle)
 h = 1.0_r8 - xn(n)
-Ar(1) = h*ap(1); Ib(1) = h*ap(1)*jt_base(n); Ie(1) = h*ap(1)*jt_eq(n)
+Ar(1) = h*ap(1); Vr(1) = h*ap(1)/ravgs(n,2); Ib(1) = h*ap(1)*jt_base(n); Ie(1) = h*ap(1)*jt_eq(n)
 DO i = 2, n
   k = n + 1 - i
   h = 0.5_r8*(xn(k+1) - xn(k))
   Ar(i) = Ar(i-1) + h*(ap(i) + ap(i-1))
+  Vr(i) = Vr(i-1) + h*(ap(i)/ravgs(k,2) + ap(i-1)/ravgs(k+1,2))
   Ib(i) = Ib(i-1) + h*(ap(i)*jt_base(k) + ap(i-1)*jt_base(k+1))
   Ie(i) = Ie(i-1) + h*(ap(i)*jt_eq(k) + ap(i-1)*jt_eq(k+1))
 END DO
@@ -950,10 +1034,30 @@ END DO
 !   the floor is also held on the unsmoothed q_base (qr)
 qr(1:nk) = qb(1:nk)
 CALL quad_smooth(nk, rho(kk(1:nk)), qb(1:nk), saw_nsmooth)
+!---Flattening radius (saw_flatten), until it is taken: the outermost rho where the equilibrium's q is at the floor
+IF((self%boot_ops%saw_flatten > 0) .AND. (self%flat_rho_s <= 0.0_r8))THEN
+  r_fl = 0.0_r8
+  DO i = n-1, 1, -1
+    IF(q_eq(i) > self%boot_ops%saw_q_s + flat_q_tol)CYCLE
+    r_fl = rho(i) + (self%boot_ops%saw_q_s + flat_q_tol - q_eq(i))/(q_eq(i+1) - q_eq(i))*(rho(i+1) - rho(i))
+    EXIT
+  END DO
+  self%flat_nset = MERGE(self%flat_nset + 1, 0, ABS(r_fl - self%flat_rho_c) < flat_dr_tol)
+  self%flat_rho_c = r_fl
+  self%flat_q0 = RESHAPE([rho, q_eq], [n, 2])
+END IF
+!---Once the radius is taken (saw_flatten), q is held at the unflattened equilibrium's where the pressure is flattened,
+!   rejoining the reset's inside the LCFS
+r_hold = 0.0_r8
+IF((self%flat_rho_s > 0.0_r8) .AND. ALLOCATED(self%flat_q0))THEN
+  r_hold = MIN(self%flat_rho_s + self%boot_ops%saw_flatten_width, 1.0_r8 - self%boot_ops%saw_width)
+  CALL nodes_interp(self%boot_ops%bs_interp, SIZE(self%flat_q0,1), self%flat_q0(:,1), self%flat_q0(:,2), nk, &
+    rho(kk(1:nk)), qh(1:nk))
+END IF
 CALL saw_reset_1d(nk, rho(kk(1:nk)), qb(1:nk), Ib(kk(1:nk)), Ar(kk(1:nk)), c1(kk(1:nk)), &
                   self%boot_ops%saw_q_s, self%boot_ops%saw_dq, self%boot_ops%saw_ramp, &
                   self%boot_ops%saw_rule, self%boot_ops%saw_drop, self%boot_ops%saw_width, self%boot_ops%saw_shear, &
-                  qn(1:nk), djr(1:nk), wr(1:nk), rho_s, rho_m, rho_out, n_dips, w, ierr, qr(1:nk))
+                  qn(1:nk), djr(1:nk), wr(1:nk), rho_s, rho_m, rho_out, n_dips, w, ierr, qr(1:nk), r_hold, qh(1:nk))
 IF(ierr /= 0)THEN
   CALL oft_warn('saw_redistribute: sawtooth reset failed, keeping the last reset this update')
   RETURN
@@ -988,11 +1092,14 @@ END IF
 self%boot_profs%saw_rho_m = rho_m
 self%boot_profs%saw_rho_out = rho_out
 self%boot_profs%saw_n_dips = n_dips
+IF(self%boot_ops%saw_flatten > 0)THEN ! rho and the volume of the next updates' flattening
+  self%flat_rho = rho; self%flat_vol = Vr
+END IF
 IF(self%boot_ops%diagnose_bs)THEN
   WRITE(*,'(A,3F8.4,I3,F7.3,2F8.4)') '  [saw] rho_s rho_m rho_out n_dips w q_base(0) q_new(0) = ', &
     rho_s, rho_m, rho_out, n_dips, w, qb(1), qn(1)
 END IF
-DEALLOCATE(q_eq, c1, rho, qb, qr, Ib, Ie, Ar, ap, qn, djr, wr, r, phi, g, kk, djn, wn, jn)
+DEALLOCATE(q_eq, c1, rho, qb, qr, qh, Ib, Ie, Ar, Vr, ap, qn, djr, wr, r, phi, g, kk, djn, wn, jn)
 END SUBROUTINE saw_redistribute
 !---------------------------------------------------------------------------------
 !> Slopes dy/dx at the nodes of a cubic through (x, y), x strictly monotonic: `method` 2 = pchip (Fritsch-Carlson:
@@ -1120,11 +1227,12 @@ END SUBROUTINE quad_smooth
 !! rule 2 with `width` > 0: each interval is reset on the current instead (@ref band_reset), with C2 joins.
 !! rule 3 (shear floor): each q < q_s region holds q at or above a floor rising from q_s with slope `shear`,
 !! out to where the base q is back above it (@ref floor_reset), weighted as rule 1.
+!! With `rho_hold` > 0 (saw_flatten), q is then held at `q_hold` inside it, rejoining the reset's over `width` outside.
 !! dI = I*(q/q_new - 1) (with q_raw, lowered where a q-target reset acts until q_raw*I/(I + dI) >= q_s; the
 !! current-blend reset holds min(q, q_raw) itself), dj = (d dI/dA)/c1.
 !---------------------------------------------------------------------------------
 SUBROUTINE saw_reset_1d(n, rho, q, I, A, c1, q_s, dq, ramp, rule, drop, width, shear, q_new, dj, wr, rho_s, rho_m, &
-                        rho_out, n_dips, w, ierr, q_raw)
+                        rho_out, n_dips, w, ierr, q_raw, rho_hold, q_hold)
 INTEGER(i4), INTENT(in) :: n
 REAL(r8), INTENT(in) :: rho(n) !< Radius, ascending from the axis
 REAL(r8), INTENT(in) :: q(n) !< Base q
@@ -1141,9 +1249,11 @@ REAL(r8), INTENT(out) :: q_new(n), dj(n), wr(n), rho_s, rho_m, rho_out, w
 INTEGER(i4), INTENT(out) :: n_dips
 INTEGER(i4), INTENT(out) :: ierr !< 0 on success, -1 if a gradient failed (no reset: q_new = q, dj = 0)
 REAL(r8), OPTIONAL, INTENT(in) :: q_raw(n) !< Base q before smoothing (`q` smoothed), held >= q_s where the reset acts
+REAL(r8), OPTIONAL, INTENT(in) :: rho_hold !< Outer end of the held q (0: none)
+REAL(r8), OPTIONAL, INTENT(in) :: q_hold(n) !< Held q
 INTEGER(i4) :: k, ia, n_low
 INTEGER(i4), ALLOCATABLE :: reg_start(:), reg_end(:)
-REAL(r8) :: qm
+REAL(r8) :: qm, hold, b
 LOGICAL :: ok, ok_b
 REAL(r8), ALLOCATABLE :: dI(:), gq(:), qt(:), wb(:), jb(:), jc(:), dIc(:), ql(:)
 q_new = q; dj = 0.0_r8; wr = 0.0_r8; rho_s = 0.0_r8; rho_m = 0.0_r8; rho_out = 0.0_r8; w = 0.0_r8; n_dips = 0
@@ -1164,12 +1274,15 @@ DO k = 1, n
   END IF
   reg_end(n_low) = k
 END DO
-IF(n_low == 0)RETURN
+hold = 0.0_r8
+IF(PRESENT(rho_hold) .AND. PRESENT(q_hold))hold = rho_hold
+IF((n_low == 0) .AND. (hold <= 0.0_r8))RETURN
 CALL gradient_(n, rho, q, gq, ierr, edge_order=1)
 IF(ierr /= 0)RETURN
 qm = q_s + dq
 !---Sawtooth radius (both rules) and rule 1's reset, from the outermost q < q_s region
-CALL full_reset(n_low, qt, rho_s, rho_m, ok)
+ok = .FALSE.
+IF(n_low > 0)CALL full_reset(n_low, qt, rho_s, rho_m, ok)
 IF(.NOT.ok)THEN
   rho_s = 0.0_r8; rho_m = 0.0_r8
 END IF
@@ -1208,6 +1321,14 @@ ELSE
     END IF
     ia = 0
   END DO
+END IF
+IF(hold > 0.0_r8)THEN
+  DO k = 1, n
+    b = 1.0_r8 - smooth_step((rho(k) - hold)/width)
+    q_new(k) = q_new(k) + b*(q_hold(k) - q_new(k))
+    wr(k) = MAX(wr(k), b)
+  END DO
+  rho_out = MAX(rho_out, hold + width)
 END IF
 dI = I*(q/q_new - 1.0_r8)
 IF(PRESENT(q_raw))dI = dI + wr*(1.0_r8 - wb)*MIN(I*(q_raw/q_s - 1.0_r8) - dI, 0.0_r8)
@@ -1368,13 +1489,6 @@ DO kk = 1, n
   END IF
 END DO
 END FUNCTION band_floor
-!---C2 step: 0 for t <= 0, 1 for t >= 1, 6t^5 - 15t^4 + 10t^3 between
-PURE FUNCTION smooth_step(t) RESULT(s)
-REAL(r8), INTENT(in) :: t
-REAL(r8) :: s
-s = MIN(MAX(t, 0.0_r8), 1.0_r8)
-s = s**3*(10.0_r8 - 15.0_r8*s + 6.0_r8*s**2)
-END FUNCTION smooth_step
 !---Shear-floor reset (rule 3). Each q < q_s region, from its start r_in (the axis, or its inner q_s crossing), gets
 !   the floor L = q_s + shear*floor_ramp(rho - r_in) and the target max(q, L), joined by a C2 smooth maximum of scale
 !   d (about `width` in rho at the gentler of the two joins) from where q is d above q_s inside to where it is d above
@@ -1631,6 +1745,89 @@ ELSE
 END IF
 END FUNCTION pshape
 END SUBROUTINE saw_reset_1d
+!------------------------------------------------------------------------------
+!> C2 step: 0 for t <= 0, 1 for t >= 1, 6t^5 - 15t^4 + 10t^3 between
+!------------------------------------------------------------------------------
+PURE FUNCTION smooth_step(t) RESULT(s)
+REAL(r8), INTENT(in) :: t
+REAL(r8) :: s
+s = MIN(MAX(t, 0.0_r8), 1.0_r8)
+s = s**3*(10.0_r8 - 15.0_r8*s + 6.0_r8*s**2)
+END FUNCTION smooth_step
+!------------------------------------------------------------------------------
+!> saw_flatten 1 (volume, as bouquet's swb_saw_flatten): a content profile on the nodes (axis first) made flat inside
+!! the flattening radius, its gradient leaving the flat core within saw_flatten_drop and rejoining the profile's at the
+!! radius + saw_flatten_width (C2 steps in rho), the LCFS value and the content (trapezoid in the enclosed volume) kept
+!------------------------------------------------------------------------------
+SUBROUTINE flat_keep(self, c)
+CLASS(jphi_bs_flux_func), INTENT(in) :: self
+REAL(r8), INTENT(inout) :: c(:) !< Profile on the nodes, axis first
+INTEGER(i4) :: i, n
+REAL(r8) :: rh, s_in, cq
+REAL(r8) :: p(SIZE(c)), q(SIZE(c))
+n = SIZE(c)
+p(n) = c(n); q(n) = 0.0_r8
+DO i = n-1, 1, -1
+  rh = 0.5_r8*(self%flat_rho(i) + self%flat_rho(i+1)) - self%flat_rho_s
+  s_in = MERGE(1.0_r8, 0.0_r8, rh > 0.0_r8)
+  IF(self%boot_ops%saw_flatten_drop > 0.0_r8)s_in = smooth_step(rh/self%boot_ops%saw_flatten_drop)
+  p(i) = p(i+1) - s_in*(c(i+1) - c(i))
+  q(i) = q(i+1) + s_in*(1.0_r8 - smooth_step(rh/self%boot_ops%saw_flatten_width))*(self%flat_rho(i+1) - self%flat_rho(i))
+END DO
+cq = vint(q)
+IF(cq > 0.0_r8)c = p - (vint(p) - vint(c))/cq*q
+CONTAINS
+!> Integral over the enclosed volume (trapezoid)
+PURE FUNCTION vint(f) RESULT(t)
+REAL(r8), INTENT(in) :: f(:)
+REAL(r8) :: t
+t = 0.5_r8*SUM((f(2:n) + f(1:n-1))*(self%flat_vol(2:n) - self%flat_vol(1:n-1)))
+END FUNCTION vint
+END SUBROUTINE flat_keep
+!------------------------------------------------------------------------------
+!> saw_flatten: P and the pax target. The unflattened ones (kept on first use) are restored; with `flat`, once the radius
+!! is taken, the pressure on the nodes is flattened (@ref flat_keep) and P' rebuilt there as solve_bootstrap builds it
+!! (bs_interp slopes in the profile coordinate, 0 on the LCFS), pax keeping the pressure scale
+!------------------------------------------------------------------------------
+SUBROUTINE flatten_pressure(self, gseq, psi_n, flat)
+CLASS(jphi_bs_flux_func), INTENT(inout) :: self
+CLASS(gs_equil), INTENT(inout) :: gseq
+REAL(r8), INTENT(in) :: psi_n(0:) !< Nodes: LCFS (0) and the profile nodes
+LOGICAL, INTENT(in) :: flat !< Flatten (else the unflattened P only)
+INTEGER(i4) :: i, n, ierr
+REAL(r8) :: pscale, b(2)
+REAL(r8), ALLOCATABLE :: p(:), g(:)
+LOGICAL :: ok
+b = gseq%plasma_bounds
+IF(.NOT.ALLOCATED(self%flat_pp0))THEN
+  ok = .FALSE.
+  SELECT TYPE(P => torflux_unwrap(gseq%P))
+    TYPE IS(linterp_flux_func)
+      IF(P%npsi == self%npsi)ok = ALL(P%x == self%x)
+  END SELECT
+  IF(.NOT.ok)CALL oft_abort('saw_flatten needs P on the ffp_prof nodes, as solve_bootstrap sets it', &
+    'flatten_pressure', __FILE__)
+  ALLOCATE(self%flat_pp0(gseq%P%ndofs))
+  CALL gseq%P%get_cofs(self%flat_pp0)
+  self%flat_pax0 = gseq%pax_target
+END IF
+ierr = gseq%P%set_cofs(self%flat_pp0)
+gseq%pax_target = self%flat_pax0
+IF(.NOT.(flat .AND. (self%flat_rho_s > 0.0_r8) .AND. ALLOCATED(self%flat_vol)))RETURN ! Unflattened (or no radius yet)
+n = self%npsi + 1
+ALLOCATE(p(n), g(n))
+pscale = self%flat_pax0/gseq%P%f(b(2))
+DO i = 1, n
+  p(i) = gseq%P%f(psi_n(n-i)*(b(2) - b(1)) + b(1))
+END DO
+CALL flat_keep(self, p)
+CALL gradient_(n, [0.0_r8, self%x]*(b(2) - b(1)), p(n:1:-1), g, ierr, method=self%boot_ops%bs_interp) ! Per unit flux, as P%fp
+IF(ierr /= 0)CALL oft_abort("saw_flatten: P' of the flattened pressure failed", 'flatten_pressure', __FILE__)
+ierr = gseq%P%set_cofs(g(n-gseq%P%ndofs+1:n)) ! Coefficients: the last ndofs nodes (linterp with P'(LCFS) = 0 fixes the first)
+gseq%pax_target = pscale*gseq%P%f(b(2))
+IF(self%boot_ops%diagnose_bs)WRITE(*,'(A,F8.4,3ES12.4)')'  [flatten] radius pax0 pax p_axis(nodes) = ', &
+  self%flat_rho_s, self%flat_pax0, gseq%pax_target, pscale*p(1)
+END SUBROUTINE flatten_pressure
 !------------------------------------------------------------------------------
 !> Evaluate terms in augmented tracing ODE for computing Sauter factors
 !! (see @ref sauter_fc)
@@ -2089,6 +2286,7 @@ DO i = 1, n_psi
   ni(i) = gseq%ni%fp(psi_N(i))
   Zeff(i) = gseq%Zeff%fp(psi_N(i))
 END DO
+IF(self%boot_ops%saw_flatten > 0)CALL flatten_kinetics
 IF(MAXVAL(Te) > 5.0e5_r8)CALL oft_warn('calculate_bootstrap: max(Te) > 500 keV — profiles should be in keV, not eV')
 IF(MAXVAL(Ti) > 5.0e5_r8)CALL oft_warn('calculate_bootstrap: max(Ti) > 500 keV — profiles should be in keV, not eV')
 ! Get I(psi) = R*Bt = F(psi) profile on the psi_N grid
@@ -2178,6 +2376,27 @@ IF(self%boot_ops%diagnose_bs)THEN
   WRITE(*,'(A,3ES12.4)') '    jphi_bs  : ', jphi_bs(1), jphi_bs(n_psi/2), jphi_bs(n_psi)
 END IF
 CONTAINS
+!> saw_flatten: the kinetics flattened through their contents n_e, n_i, n_e T_e, n_i T_i, n_e Z_eff (@ref flat_keep,
+!! on the nodes with the LCFS) once the radius is taken, kept in the profiles (LCFS first); the bootstrap uses the
+!! unflattened ones
+SUBROUTINE flatten_kinetics
+REAL(r8) :: c(n_psi+1,5)
+INTEGER(i4) :: k
+c(:,1) = [ne(n_psi:1:-1), gseq%ne%fp(0.0_r8)]
+c(:,2) = [ni(n_psi:1:-1), gseq%ni%fp(0.0_r8)]
+c(:,3) = c(:,1)*[Te(n_psi:1:-1), gseq%Te%fp(0.0_r8)*1000.0_r8]
+c(:,4) = c(:,2)*[Ti(n_psi:1:-1), gseq%Ti%fp(0.0_r8)*1000.0_r8]
+c(:,5) = c(:,1)*[Zeff(n_psi:1:-1), gseq%Zeff%fp(0.0_r8)]
+IF((self%flat_rho_s > 0.0_r8) .AND. ALLOCATED(self%flat_vol))THEN
+  DO k = 1, 5
+    CALL flat_keep(self, c(:,k))
+  END DO
+END IF
+self%boot_profs%ne_flat = c(n_psi+1:1:-1,1); self%boot_profs%ni_flat = c(n_psi+1:1:-1,2)
+self%boot_profs%te_flat = c(n_psi+1:1:-1,3)/c(n_psi+1:1:-1,1)/1000.0_r8
+self%boot_profs%ti_flat = c(n_psi+1:1:-1,4)/c(n_psi+1:1:-1,2)/1000.0_r8
+self%boot_profs%zeff_flat = c(n_psi+1:1:-1,5)/c(n_psi+1:1:-1,1)
+END SUBROUTINE flatten_kinetics
 !> Zero non-finite values (where F -> 0) and extrapolate to the LCFS/axis, where q is undefined
 SUBROUTINE finish(a)
 REAL(r8), INTENT(inout) :: a(0:n_psi)

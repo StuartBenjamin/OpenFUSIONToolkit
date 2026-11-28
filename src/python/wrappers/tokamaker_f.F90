@@ -105,6 +105,9 @@ TYPE, BIND(C) :: tokamaker_boot_ops_type
   REAL(c_double)  :: saw_width = 0.d0             !< Rule 2: rejoin width of the current-blend reset (0 = q-target reset);
                                                   !! rule 3: width of the floor's slope ramp and joins
   REAL(c_double)  :: saw_shear = 0.d0             !< Rule 3: minimum dq/drho of the q floor
+  INTEGER(c_int)  :: saw_flatten = 0              !< Pressure flat where the unflattened q is at the floor: 0 off, 1 volume
+  REAL(c_double)  :: saw_flatten_drop = 0.d0      !< Flattening: width over which the gradient leaves the flat core
+  REAL(c_double)  :: saw_flatten_width = 0.d0     !< Flattening: width beyond the radius over which the profiles rejoin
   INTEGER(c_int)  :: bs_interp = 2                !< Kinetic gradients and sawtooth reset: 1 linterp, 2 hermite, 3 cubic
 END TYPE tokamaker_boot_ops_type
 !---------------------------------------------------------------------------------
@@ -666,6 +669,10 @@ TYPE IS (jphi_bs_flux_func)
   I%boot_ops%saw_drop = bops%saw_drop
   I%boot_ops%saw_width = bops%saw_width
   I%boot_ops%saw_shear = bops%saw_shear
+  I%boot_ops%saw_flatten = bops%saw_flatten
+  I%boot_ops%saw_flatten_drop = bops%saw_flatten_drop
+  I%boot_ops%saw_flatten_width = bops%saw_flatten_width
+  I%flat_rho_s = 0.d0 ! New options: the flattening radius is found again
   I%boot_ops%bs_interp = bops%bs_interp
 CLASS DEFAULT
   CALL copy_string('Run set_profiles with a jphi-split-bootstrap profile before calling set_boot_ops.',error_str)
@@ -705,6 +712,9 @@ TYPE IS (jphi_bs_flux_func)
   bops%saw_drop = I%boot_ops%saw_drop
   bops%saw_width = I%boot_ops%saw_width
   bops%saw_shear = I%boot_ops%saw_shear
+  bops%saw_flatten = I%boot_ops%saw_flatten
+  bops%saw_flatten_drop = I%boot_ops%saw_flatten_drop
+  bops%saw_flatten_width = I%boot_ops%saw_flatten_width
   bops%bs_interp = I%boot_ops%bs_interp
 CLASS DEFAULT
   initialized = .FALSE. ! Not a bootstrap profile: no options
@@ -743,12 +753,13 @@ END SUBROUTINE tokamaker_get_boot_prof
 !---------------------------------------------------------------------------------
 !> Get the sawtooth scalars of the last jphi_bs_update (zero if none or not a bootstrap profile)
 !---------------------------------------------------------------------------------
-SUBROUTINE tokamaker_get_boot_saw(tMaker_equil_ptr,saw_rho_m,saw_rho_out,saw_n_dips,error_str) &
+SUBROUTINE tokamaker_get_boot_saw(tMaker_equil_ptr,saw_rho_m,saw_rho_out,saw_n_dips,saw_flat_rho,error_str) &
   BIND(C,NAME="tokamaker_get_boot_saw")
 TYPE(c_ptr), VALUE, INTENT(in) :: tMaker_equil_ptr !< Pointer to TokaMaker equilibrium object
 REAL(c_double), INTENT(out) :: saw_rho_m !< Sawtooth radius at the last reset (0 = none)
 REAL(c_double), INTENT(out) :: saw_rho_out !< Outer end of the last reset (0 = none)
 INTEGER(c_int), INTENT(out) :: saw_n_dips !< Regions reset at the last reset
+REAL(c_double), INTENT(out) :: saw_flat_rho !< saw_flatten radius (0 = none)
 CHARACTER(KIND=c_char), INTENT(out) :: error_str(OFT_ERROR_SLEN) !< Error string (empty if no error)
 CLASS(flux_func), POINTER :: I_base
 TYPE(gs_equil), POINTER :: tMaker_equil_obj
@@ -756,12 +767,14 @@ IF(.NOT.tokamaker_equil_ccast(tMaker_equil_ptr,tMaker_equil_obj,error_str))RETUR
 saw_rho_m = 0.d0
 saw_rho_out = 0.d0
 saw_n_dips = 0
+saw_flat_rho = 0.d0
 I_base=>torflux_unwrap(tMaker_equil_obj%I)
 SELECT TYPE(I => I_base)
 TYPE IS (jphi_bs_flux_func)
   saw_rho_m = I%boot_profs%saw_rho_m
   saw_rho_out = I%boot_profs%saw_rho_out
   saw_n_dips = I%boot_profs%saw_n_dips
+  saw_flat_rho = I%flat_rho_s
 END SELECT
 END SUBROUTINE tokamaker_get_boot_saw
 !---------------------------------------------------------------------------------

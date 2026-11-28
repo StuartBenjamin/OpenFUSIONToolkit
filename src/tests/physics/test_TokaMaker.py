@@ -2239,6 +2239,46 @@ def run_ITER_bootstrap_saw_internal(mesh_resolution, fe_order, mp_q):
         print(f"saw axis peak: jphi_total[0]/jphi_total[1] - 1 = {p_j['jphi_total'][0]/p_j['jphi_total'][1] - 1.0:.2e}")
         if abs(p_j['jphi_total'][0]/p_j['jphi_total'][1] - 1.0) > 0.02:
             raise AssertionError("shear floor: peak of the base current left on the axis node")
+        # (k) pressure flattening (volume) with the shear floor: P flat in the core with the input pressure's content over
+        #     the equilibrium's volume, q_min held at the floor and q as without flattening; a saved flattened state
+        #     re-solves to the same pressure
+        psi_k = np.linspace(1e-3, 0.999, 999)
+        q_s = float(q_base[0]) + 0.2
+        mygs.boot_reset()
+        mygs.solve_bootstrap(saw_q_s=q_s, saw_rule=3, saw_width=0.1, **common)
+        q_u = mygs.get_q(psi=psi_k)[1]
+        mygs.boot_reset()
+        b_k = mygs.solve_bootstrap(saw_q_s=q_s, saw_rule=3, saw_width=0.1, saw_flatten='volume', saw_flatten_drop=0.04,
+                                   saw_flatten_width=0.3, **common)
+        p_kin_k = 1e3*eC*(b_k['ne_flat']*b_k['te_flat'] + b_k['ni_flat']*b_k['ti_flat'])
+        if ('ne_flat' in p_3) or ('saw_flat_rho' in p_3) or not (b_k['saw_flat_rho'] > 0.0) \
+                or np.ptp(p_kin_k[b_k['psi_n'] <= 0.05]) > 1e-6*np.max(p_kin_k):
+            raise AssertionError("saw_flatten: radius / flattened kinetics outputs wrong (or present without it)")
+        _, q_k, rav, *_ = mygs.get_q(psi=psi_k)
+        dq = np.max(np.abs(q_k/q_u - 1.0)[psi_k <= 0.9]) # Not next to the separatrix, which moves with the pressure
+        print(f"saw flatten: q vs without flattening: max rel. diff {dq:.1e}")
+        if dq > 5e-3:
+            raise AssertionError("saw_flatten: q differs from the solve without flattening")
+        _, _, _, p_k, pp_k = mygs.get_profiles(psi=psi_k)
+        dv = rav['dV/dPsi']
+        vol = np.concatenate(([0.0], np.cumsum(0.5*(dv[1:] + dv[:-1])*np.diff(psi_k))))
+        p_kin = eC*(setup['ne']*setup['Te'] + setup['ni']*setup['Ti'])
+        dw = np.trapezoid(p_k, vol)/np.trapezoid(np.interp(psi_k, psi_sample, p_kin) - p_kin[-1], vol) - 1.0 # P(LCFS) = 0
+        core = psi_k <= 0.05
+        print(f"saw flatten: max|P'| psi_N <= 0.05 / max|P'| = {np.max(np.abs(pp_k[core]))/np.max(np.abs(pp_k)):.1e}, "
+              f"content {dw:+.1e}, min q - q_s {np.min(q_k) - q_s:+.1e}")
+        if np.max(np.abs(pp_k[core])) > 1e-3*np.max(np.abs(pp_k)) or abs(dw) > 5e-3 or abs(np.min(q_k) - q_s) > 0.01:
+            raise AssertionError("saw_flatten: pressure not flat in the core, content not kept or q_min off the floor")
+        mygs._tMaker_equil.save_TokaMaker('ITER_flat_state.h5')
+        mygs.replace_eq(source_file='ITER_flat_state.h5')
+        mygs.solve()
+        if not close(mygs.get_profiles(psi=psi_k)[3], p_k, 1e-3):
+            raise AssertionError("saw_flatten: reloaded state re-solves to another pressure")
+        mygs.set_boot_ops(saw_flatten='volume') # Radius found again, now from the flattened equilibrium
+        mygs.solve()
+        print(f"saw flatten: radius {b_k['saw_flat_rho']:.4f}, again from the flattened state {mygs.get_boot_profs()['saw_flat_rho']:.4f}")
+        if abs(mygs.get_boot_profs()['saw_flat_rho'] - b_k['saw_flat_rho']) > 1e-3:
+            raise AssertionError("saw_flatten: the radius depends on the start")
     except Exception as e:
         print(e)
         mp_q.put(None)
